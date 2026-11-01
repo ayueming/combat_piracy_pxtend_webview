@@ -82,7 +82,7 @@ class FlowLayout(QLayout):
 class SearchProgressDialog(QDialog):
     stop_clicked = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title="🔍 自动搜索运行状态"):   # ← 加参数
         super().__init__(None)
         self.setFixedSize(480, 180)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -109,7 +109,7 @@ class SearchProgressDialog(QDialog):
         """)
         tb_layout = QHBoxLayout(title_bar)
         tb_layout.setContentsMargins(12, 0, 6, 0)
-        tb_layout.addWidget(QLabel("🔍 自动搜索运行状态"))
+        tb_layout.addWidget(QLabel(title))
         tb_layout.addStretch()
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(24, 24)
@@ -197,35 +197,48 @@ class SearchInputPanel(QWidget):
         self.dynamic_sub_kws = []
         self.temp_sub_kws = []
         self.selected_sub_kws = set()
-        self.progress_dialog = None  # ★ 记录进度弹窗
-
         self.load_user_signals()
         self.setup_ui()
         self.load_books()
 
+        # ★ 搜索弹窗
+        self.progress_dialog = SearchProgressDialog(self)
+        self.progress_dialog.stop_clicked.connect(self._on_stop_search)
+        self.progress_dialog.hide()
+
+        # ★ 新增：解析弹窗（独立实例，永不销毁，只 show/hide）
+        self.parse_dialog = SearchProgressDialog(self, title="📦 数据解析中")
+        self.parse_dialog.stop_btn.hide()  # 解析不可中断，隐藏按钮
+        self.parse_dialog.hide()
+        self._parse_shown_at = 0.0  # 记录显示时间（用于最小显示时长保护）
+
         from ws_server import ws_signals
         ws_signals.search_finished.connect(self._on_search_end)
         ws_signals.scan_state_changed.connect(self._on_scan_state_changed)
-        # ★ 接收来自 ws_server 的实时进度（这个信号我们在下一步加进 ws_server）
-        ws_signals.search_progress.connect(self._on_search_progress)
+        # ★ 已停用逐条进度信号（避免跨线程信号撞上弹窗生命周期）
+        #   如需恢复 UI 实时进度，取消下面这行注释即可
+        # ws_signals.search_progress.connect(self._on_search_progress)
+
+        # ★ 新增：解析开始/结束 → 显示/隐藏 parse_dialog
+        from parser_service import parser_signals
+        parser_signals.parse_started.connect(self._on_parse_started)
+        parser_signals.parse_finished.connect(self._on_parse_finished)
 
     # ★ 接收信号更新 UI
     def _on_search_progress(self, text, current=0, maximum=0):
-        if not self.progress_dialog or not self.progress_dialog.isVisible():
-            # 队列启动搜索时，弹窗在这里被创建
-            self.progress_dialog = SearchProgressDialog(self)
-            self.progress_dialog.stop_clicked.connect(self._on_stop_search)
-
-            # 强制居中显示
+        """已停用：不再由 search_progress 信号驱动。
+        保留此方法便于以后恢复（取消 __init__ 里的 connect 注释即可）。
+        恢复后操作的是永不销毁的 progress_dialog，是安全的。"""
+        if not self.progress_dialog:
+            return
+        if not self.progress_dialog.isVisible():
             screen_geo = self.screen().availableGeometry()
             self.progress_dialog.move(screen_geo.center() - self.progress_dialog.rect().center())
             self.progress_dialog.show()
             self.progress_dialog.raise_()
             self.progress_dialog.activateWindow()
-
             self.btn_search.setEnabled(False)
             self.btn_search.setText("🔄 搜索中...")
-
         self.progress_dialog.update_status(text, current, maximum)
 
     def _on_search_end(self, batch_id):
@@ -234,12 +247,57 @@ class SearchInputPanel(QWidget):
         self._reset_search_btn()
 
     def _on_scan_state_changed(self, state):
-        """状态变更为 idle 时（涵盖超时、断连），恢复按钮"""
-        if state == "idle":
+        """scanning → 显示弹窗；idle → 隐藏弹窗（不销毁）"""
+        if state == "scanning":
+            # ★ 任务开始：显示弹窗
+            if self.progress_dialog and not self.progress_dialog.isVisible():
+                screen_geo = self.screen().availableGeometry()
+                self.progress_dialog.move(screen_geo.center() - self.progress_dialog.rect().center())
+                self.progress_dialog.update_status("🔍 正在搜索中...", 0, 0)
+                self.progress_dialog.show()
+                self.progress_dialog.raise_()
+                self.progress_dialog.activateWindow()
+            self.btn_search.setEnabled(False)
+            self.btn_search.setText("🔄 搜索中...")
+        elif state == "idle":
+            # ★ 任务结束：只隐藏，不销毁
             self._reset_search_btn()
             if self.progress_dialog:
-                self.progress_dialog.close()
-                self.progress_dialog = None
+                self.progress_dialog.hide()
+
+    def _on_parse_started(self, batch_id, total):
+        """解析开始：弹出悬浮窗并挂着（手动拾取不会走到这里）"""
+        import time
+        self._parse_shown_at = time.time()
+
+        if not self.parse_dialog.isVisible():
+            screen_geo = self.screen().availableGeometry()
+            center = screen_geo.center()
+            # 偏移一点，避免和搜索弹窗完全重叠
+            self.parse_dialog.move(
+                center.x() - self.parse_dialog.width() // 2 + 40,
+                center.y() - self.parse_dialog.height() // 2 + 60,
+            )
+            self.parse_dialog.show()
+            self.parse_dialog.raise_()
+            self.parse_dialog.activateWindow()
+
+        self.parse_dialog.update_status(f"⏳ 正在解析 {total} 条数据...", 0, 0)
+
+    def _on_parse_finished(self, success):
+        """解析结束：隐藏悬浮窗（最小显示 800ms，避免一闪而过）"""
+        import time
+        from PySide6.QtCore import QTimer
+
+        if not self.parse_dialog:
+            return
+        elapsed_ms = (time.time() - getattr(self, "_parse_shown_at", 0)) * 1000
+        remain_ms = int(800 - elapsed_ms)
+        if remain_ms > 0:
+            # 解析太快时，延迟隐藏，至少让用户看到 0.8 秒
+            QTimer.singleShot(remain_ms, self.parse_dialog.hide)
+        else:
+            self.parse_dialog.hide()
 
     def _reset_search_btn(self):
         self.btn_search.setEnabled(True)

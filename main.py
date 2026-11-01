@@ -3,9 +3,10 @@
 import os
 import sys
 import asyncio
+import faulthandler
 
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QDialog
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent, QTimer, Signal, QEasingCurve
 
 # ===== 引入 Fluent 组件 =====
 from qfluentwidgets import FluentWindow, NavigationItemPosition, FluentIcon as FIF, setTheme, Theme
@@ -27,7 +28,27 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "2.0.0"
+VERSION = "3.4.3"
+
+
+# ==========================================
+# 🌟 仅保留版本号的辅助类（框架强制要求有这个类才能加自定义控件）
+# ==========================================
+
+_FAULT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faulthandler.log")
+_FAULT_LOG_FILE = open(_FAULT_LOG_PATH, "w", encoding="utf-8")   # 必须保持引用，否则被 GC 关掉
+faulthandler.enable(file=_FAULT_LOG_FILE, all_threads=True)
+
+
+class NavLabel(QLabel):
+    clicked = Signal()
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet("color: #9CA3AF; font-size: 11px; padding: 10px;")
+
+    def setSelected(self, isSelected):
+        pass
 
 
 class MainApp(FluentWindow):
@@ -36,8 +57,13 @@ class MainApp(FluentWindow):
 
         self.setWindowTitle(f"打盗维权系统_试用版_v{VERSION}")
 
-        # 全局美化：覆盖原生的丑陋滚动条
+        # 全局美化：覆盖原生的丑陋滚动条，并将主窗口整体背景色设为侧边栏颜色
         self.setStyleSheet("""
+                    /* 主窗口背景色，让标题栏和四周边缘与侧边栏融为一体 */
+                    FluentWindow {
+                        background-color: #F0F4F1;
+                    }
+
                     /* 垂直滚动条 */
                     QScrollBar:vertical {
                         background: transparent;
@@ -81,8 +107,9 @@ class MainApp(FluentWindow):
                     }
                 """)
 
-        # 设置主题颜色（可选：深色或浅色）
-        # setTheme(Theme.DARK)
+        # 强制将标题栏背景色设为侧边栏同款色，解决箭头所指处的颜色差异
+        if hasattr(self, 'titleBar'):
+            self.titleBar.setStyleSheet("background-color: #F0F4F1;")
 
         # ===== 窗口尺寸和居中逻辑保留 =====
         screen = QApplication.primaryScreen()
@@ -98,7 +125,6 @@ class MainApp(FluentWindow):
             self.resize(1400, 900)
 
         # ===== 1. 实例化所有页面 =====
-        # FluentWindow 要求每个页面必须有唯一的 objectName
         self.books_page = BooksPage(self)
         self.books_page.setObjectName("booksPage")
 
@@ -114,7 +140,7 @@ class MainApp(FluentWindow):
         self.complaint_page = ComplaintsPage(self)
         self.complaint_page.setObjectName("complaintPage")
 
-        self.platforms_page = PlatformsPage()  # 注意：如果你的这个类不接收 main_page，就不传 self
+        self.platforms_page = PlatformsPage()
         self.platforms_page.setObjectName("platformsPage")
 
         self.evidence_page = EvidencePage()
@@ -123,19 +149,15 @@ class MainApp(FluentWindow):
         self.profile_page = ProfilePage(self)
         self.profile_page.setObjectName("profilePage")
 
-        # ==========================================
-        # 🌟 新增：强制把内部页面背景改成纯白色，解决底色断层问题
-        # ==========================================
-        # 方法 1：直接把管理页面的 stackedWidget 背景设为白色
+        # 强制把内部页面背景改成纯白色
         self.stackedWidget.setStyleSheet("""
                     QStackedWidget {
                         background-color: white;
-                        border-radius: 12px; /* 🌟 这里控制圆角的大小，数值越大越圆 */
-                        margin: 10px;        /* 🌟 关键：四周留出空隙，否则白框顶死边缘，圆角出不来 */
+                        border-radius: 12px;
+                        margin: 10px;
                     }
                 """)
 
-        # 方法 2：遍历你所有的页面，把它们的背景强制设为白色
         pages = [
             self.books_page, self.links_page, self.search_page,
             self.spider_page, self.complaint_page, self.platforms_page,
@@ -143,73 +165,104 @@ class MainApp(FluentWindow):
         ]
         for page in pages:
             page.setStyleSheet("background-color: white;")
-        # ==========================================
 
         self.navigationInterface.panel.setStyleSheet("background-color: #F0F4F1; border: none;")
 
         # ===== 2. 初始化导航栏 =====
         self.init_navigation()
 
+        # 🌟 悬停收起的延迟定时器 (从 150ms 延长到 250ms，给用户反应时间)
+        self.collapse_timer = QTimer(self)
+        self.collapse_timer.setSingleShot(True)
+        self.collapse_timer.setInterval(250)
+        self.collapse_timer.timeout.connect(self.navigationInterface.panel.collapse)
+
+        # 🌟 悬停展开的防抖定时器 (延迟 50ms，防止鼠标快速划过边缘时误触展开)
+        self.expand_timer = QTimer(self)
+        self.expand_timer.setSingleShot(True)
+        self.expand_timer.setInterval(50)
+        self.expand_timer.timeout.connect(self.navigationInterface.panel.expand)
+
+        self.navigationInterface.installEventFilter(self)
+
         # ===== 3. 监听后台信号 =====
         ws_signals.new_data_inserted.connect(self.on_new_data)
 
         # ===== 4. 监听页面切换，触发数据刷新 =====
-        # FluentWindow 内部用 stackedWidget 管理页面，监听它的切换即可
         self.stackedWidget.currentChanged.connect(self.change_page)
 
     def init_navigation(self):
         """将页面添加到左侧导航栏，并配上漂亮的图标"""
-
-        # ==========================================
-        # 方案A：调整侧边栏展开的宽度 (默认约240，这里改为200)
-        # 如果觉得还是宽，可以继续改小，如 180
-        # ==========================================
         self.navigationInterface.setExpandWidth(160)
+        self.navigationInterface.setMenuButtonVisible(False)
+        self.navigationInterface.panel.collapse()
 
-        # 注意：addSubInterface 的第 3 个参数是图标，FIF 里有大量内置图标
-        # 已根据你的要求替换为最合适的图标
+        # ==========================================
+        # 🌟 最简单的下移方法：直接修改布局的上边距
+        # (4, 16, 4, 4) 分别代表 左、上、右、下 的边距。把 16 改大或改小即可微调！
+        # ==========================================
+        try:
+            self.navigationInterface.panel.vBoxLayout.setContentsMargins(4, 16, 4, 4)
+        except AttributeError:
+            pass
+
+        # ==========================================
+        # 🌟 优化侧边栏动画：拉长动画时间，设置丝滑的缓动曲线
+        # ==========================================
+        try:
+            ani = self.navigationInterface.panel.expandAni
+            ani.setDuration(300)  # 延长动画时长到 300ms
+            ani.setEasingCurve(QEasingCurve.OutCubic)  # 设置“先快后慢”的丝滑曲线
+        except AttributeError:
+            pass
+
+        # 添加页面到导航栏
         self.addSubInterface(self.books_page, FIF.LIBRARY, "作品管理")
         self.addSubInterface(self.links_page, FIF.PENCIL_INK, "盗文链接")
-        self.addSubInterface(self.search_page, FIF.GLOBE, "检索管理")  # 纠正：global -> GLOBE
+        self.addSubInterface(self.search_page, FIF.GLOBE, "检索管理")
         self.addSubInterface(self.spider_page, FIF.PASTE, "抓取管理")
         self.addSubInterface(self.complaint_page, FIF.SEND, "投诉管理")
-        self.addSubInterface(self.platforms_page, FIF.TAG, "投诉平台")  # 纠正：sent -> SEND
+        self.addSubInterface(self.platforms_page, FIF.TAG, "投诉平台")
         self.addSubInterface(self.evidence_page, FIF.FOLDER, "维权资料")
 
-        # 把「个人与帮助」固定在左下角
         self.addSubInterface(self.profile_page, FIF.SETTING, "个人与帮助", NavigationItemPosition.BOTTOM)
 
         # 默认选中“作品管理”
         self.navigationInterface.setCurrentItem("booksPage")
 
-        # （可选）把版本号写在左下角
-        version_label = QLabel(f"v.{VERSION} ©HowLittle")
-        version_label.setStyleSheet("color: #9CA3AF; font-size: 11px; padding: 10px;")
-        # 附加到侧边栏底部
-        try:
-            self.navigationInterface.addWidget(
-                routeKey="version_label",
-                widget=version_label,
-                onClick=lambda: None,
-                position=NavigationItemPosition.BOTTOM
-            )
-        except Exception:
-            pass
+        # ==========================================
+        # 🌟 使用自定义的 NavLabel 做版本号
+        # ==========================================
+        version_label = NavLabel(f"v.{VERSION} ©HowLittle")
+        self.navigationInterface.addWidget(
+            routeKey="version_label",
+            widget=version_label,
+            onClick=lambda: None,
+            position=NavigationItemPosition.BOTTOM
+        )
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, 'navigationInterface') and obj == self.navigationInterface:
+            if event.type() == QEvent.Enter:
+                self.collapse_timer.stop()
+                self.expand_timer.start()  # 延迟 50ms 后再展开
+            elif event.type() == QEvent.Leave:
+                self.expand_timer.stop()
+                self.collapse_timer.start()  # 延迟 250ms 后再收起
+        return super().eventFilter(obj, event)
 
     def change_page(self, index):
-        """页面切换时触发，替代你原来的 change_page"""
+        """页面切换时触发"""
         widget = self.stackedWidget.widget(index)
         if not widget:
             return
 
-        # 通过 objectName 来判断当前切到了哪个页面
         name = widget.objectName()
 
         if name == "linksPage":
             self.links_page.refresh_table()
         elif name == "searchPage":
             self.search_page.load_books()
-            # 右侧面板刷新
             if hasattr(self.search_page, 'result_panel'):
                 self.search_page.result_panel.refresh_tables()
         elif name == "spiderPage":
@@ -223,33 +276,33 @@ class MainApp(FluentWindow):
     def on_new_data(self, count):
         """后台洗完数据后，自动刷新你的检索页"""
         print(f"UI收到通知：后台新增 {count} 条数据，正在刷新界面...")
-        # SearchResultPanel 已经自己监听并刷新了，这里不需要额外操作。
+
+    def closeEvent(self, event):
+        # spontaneous=True  → 用户/系统点了 X 或者 Alt+F4
+        # spontaneous=False → 代码里某处调用了 close() / hide() 之类
+        print(f"[退出追踪] MainApp.closeEvent 触发, spontaneous={event.spontaneous()}")
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":
-    # ==========================================
-    # ★ 新增：全局异常捕获（防闪退无提示，用于写日志排查）
-    # ==========================================
     import traceback
     import datetime
 
 
     def exception_hook(exctype, value, tb):
-        # 捕获所有未处理的异常并写入本地文件
         error_msg = "".join(traceback.format_exception(exctype, value, tb))
         with open("crash_log.txt", "a", encoding="utf-8") as f:
             f.write(f"\n[{datetime.datetime.now()}] 崩溃信息:\n{error_msg}\n")
-        # 调用系统默认的异常处理（如果你在IDE里运行，还是会在控制台打印）
         sys.__excepthook__(exctype, value, tb)
 
 
-    # 将系统的异常钩子替换成我们自己的
     sys.excepthook = exception_hook
-    # ==========================================
 
     app = QApplication(sys.argv)
 
-    # 启动后台通信线程
+    app.lastWindowClosed.connect(lambda: print("[退出追踪] lastWindowClosed 触发（最后一个窗口已关闭）"))
+    app.aboutToQuit.connect(lambda: print("[退出追踪] aboutToQuit 触发（Qt 事件循环即将结束）"))
+
     start_ws_server()
 
     auto_ok = try_auto_login()
@@ -266,6 +319,9 @@ if __name__ == "__main__":
         window.show()
 
         exit_code = app.exec()
+
+        print(f"[退出追踪] app.exec() 返回, exit_code={exit_code}, "
+              f"logout={getattr(window, '_logout_requested', False)}")
 
         if getattr(window, "_logout_requested", False):
             clear_session()

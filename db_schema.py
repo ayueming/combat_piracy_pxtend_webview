@@ -245,6 +245,7 @@ def _ensure_sites(conn, cursor):
         ("parent_url", "TEXT"), ("parent_title", "TEXT"),
         # 原 ensure_db_columns 老库缺的 3 列
         ("complaint_time", "TEXT"), ("resource_status", "TEXT"), ("match_status", "TEXT DEFAULT ''"),
+        ("target_platform", "TEXT DEFAULT ''"),
     ]:
         _add_column_if_missing(cursor, "sites", col_name, col_type)
     conn.commit()

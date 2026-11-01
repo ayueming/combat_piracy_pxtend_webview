@@ -8,6 +8,7 @@ from app_data.crawl_status_consts import CRAWL_STATUS_PENDING
 
 
 class ParserSignals(QObject):
+    parse_started = Signal(str, int)
     parse_finished = Signal(bool)
 
 
@@ -29,6 +30,22 @@ def _worker():
         # 从待处理集合中移除（允许后续再有新数据触发该批次）
         with _lock:
             _pending_batches.discard(batch_id)
+
+        # ★ 新增：统计本批待解析数量并通知 UI（仅搜索任务弹窗，手动拾取不弹）
+        try:
+            conn = get_conn()
+            try:
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM draft_links WHERE batch_id = ? AND crawl_status = ?",
+                    (batch_id, CRAWL_STATUS_PENDING)
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            # ★ only_manual=True（手动拾取）不弹窗，只在控制台留日志
+            if total > 0 and not only_manual:
+                parser_signals.parse_started.emit(batch_id, total)
+        except Exception as e:
+            print(f"⚠️ [解析] 统计待解析数量失败: {e}")
 
         try:
             # ★ 核心：循环解析直到该批次彻底没有 pending

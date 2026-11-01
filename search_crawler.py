@@ -4,6 +4,12 @@ import random
 import time
 
 
+# ★ 开关：False = 不向 UI 发逐条进度信号（只保留控制台 print）
+#   原因：跨线程 emit 到 UI 弹窗，在"任务交替"时可能撞上弹窗生命周期问题
+#   排查时如需恢复 UI 实时进度，把这里改成 True 即可
+_EMIT_PROGRESS_TO_UI = False
+
+
 class SearchCrawler:
     def __init__(self, browser_manager):
         self.bm = browser_manager
@@ -27,10 +33,11 @@ class SearchCrawler:
             pass
 
     def _log(self, text, current=0, maximum=0):
-        """统一的进度日志输出：同时打印到控制台，并发信号给 UI 弹窗"""
-        print(text)
+        """统一的进度日志输出：始终打印到控制台；是否发信号给 UI 由开关控制"""
+        print(text)  # ★ 控制台日志始终保留，便于排查
+        if not _EMIT_PROGRESS_TO_UI:
+            return
         try:
-            # ★ 延迟导入信号，避免循环引用
             from ws_server import ws_signals
             ws_signals.search_progress.emit(text, current, maximum)
             print(f"📡 [DEBUG] 信号已发出: {text}")

@@ -21,7 +21,10 @@ from app_paths import get_user_dir, get_session_path, FILE_AUTH
 EMAIL_PATTERN = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
 
 # ★ 全局复用同一个 HTTP 连接池，大幅减少 TLS 握手时间
-_http_client = httpx.Client(timeout=15.0)
+_http_client = httpx.Client(
+    timeout=15.0,
+    headers={"Connection": "close"},   # ★ 新增这一行
+)
 
 
 def create_eye_icon(is_open=True):
