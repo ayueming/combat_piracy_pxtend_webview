@@ -429,7 +429,7 @@ class BooksPage(QWidget):
             QMessageBox.warning(self, "提示", "请先保存该作品后再制作维权书！")
             return
 
-        self.main_window.sidebar.setCurrentRow(5)
+        self.main_window.switchTo(self.main_window.evidence_page)
 
         if hasattr(self.main_window, 'evidence_page'):
             ep = self.main_window.evidence_page

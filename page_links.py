@@ -720,7 +720,7 @@ class LinksPage(QWidget):
             )
             return
 
-        self.main_window.sidebar.setCurrentRow(4)
+        self.main_window.switchTo(self.main_window.complaint_page)
         self.main_window.complaint_page.load_batches(batches)
 
     def refresh_books(self):
