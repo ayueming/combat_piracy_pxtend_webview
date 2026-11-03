@@ -48,6 +48,7 @@ class ProfilePage(QWidget):
 
         self.tabs.addTab(self._create_account_tab(), "个人中心")
         self.tabs.addTab(self._create_help_tab(), "使用帮助")
+        self.tabs.addTab(self._create_changelog_tab(), "版本说明")
 
         layout.addWidget(self.tabs)
 
@@ -190,6 +191,38 @@ class ProfilePage(QWidget):
                 browser.setPlainText(f"读取帮助文档失败：{e}")
         else:
             browser.setPlainText("帮助文档缺失，请在软件目录下创建 help.md 文件。")
+
+        return browser
+
+    def _create_changelog_tab(self):
+        """版本说明面板：读取 changelog.md"""
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        # 保持与帮助文档一致的样式
+        browser.setStyleSheet(f"""
+            QTextBrowser {{ border: none; background-color: {BG_WHITE};
+                           padding: 20px; font-size: 14px; color: {TEXT_DARK}; }}
+        """)
+
+        # 查找 changelog.md 路径（优先外部，兼容打包后的内部目录）
+        if getattr(sys, 'frozen', False):
+            exe_dir = os.path.dirname(sys.executable)
+        else:
+            exe_dir = os.path.dirname(os.path.abspath(__file__))
+
+        changelog_path = os.path.join(exe_dir, "changelog.md")
+
+        if not os.path.exists(changelog_path) and hasattr(sys, '_MEIPASS'):
+            changelog_path = os.path.join(sys._MEIPASS, "changelog.md")
+
+        if os.path.exists(changelog_path):
+            try:
+                with open(changelog_path, "r", encoding="utf-8") as f:
+                    browser.setMarkdown(f.read())
+            except Exception as e:
+                browser.setPlainText(f"读取版本说明失败：{e}")
+        else:
+            browser.setPlainText("版本说明文档缺失，请在软件目录下创建 changelog.md 文件。")
 
         return browser
 

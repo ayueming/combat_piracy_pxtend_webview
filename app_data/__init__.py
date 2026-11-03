@@ -32,11 +32,16 @@ if _invalid_domains:
         f"【配置致命错误】complaint_platform_domains.py 中存在未在 complaint_platform_consts.py 注册的平台名：{_invalid_domains}"
     )
 
-# 2. 搜索模板里的平台名，必须在平台配置中存在
-_invalid_templates = set(SEARCH_TEMPLATES.keys()) - set(ALL_SUB_PLATFORMS)
+# 2. 搜索模板里的平台名，必须在平台配置中存在（★ 改为校验 real_platform）
+_invalid_templates = set()
+for platform, cfg in SEARCH_TEMPLATES.items():
+    real_name = cfg.get("real_platform", platform)
+    if real_name not in ALL_SUB_PLATFORMS:
+        _invalid_templates.add(real_name)
+
 if _invalid_templates:
     raise RuntimeError(
-        f"【配置致命错误】search_templates.py 中存在未在 complaint_platform_consts.py 注册的平台名：{_invalid_templates}"
+        f"【配置致命错误】search_templates.py 中的 real_platform 存在未在 complaint_platform_consts.py 注册的平台名：{_invalid_templates}"
     )
 
 # 3. 对外暴露的 __all__（方便其他文件使用 from app_data import *）

@@ -28,14 +28,23 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "3.4.4"
+VERSION = "3.5.1"
 
 
 # ==========================================
 # 🌟 仅保留版本号的辅助类（框架强制要求有这个类才能加自定义控件）
 # ==========================================
 
-_FAULT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faulthandler.log")
+# ==========================================
+# 🌟 修改 1：将 faulthandler 日志存入 AppData
+# ==========================================
+# 获取用户 AppData/Roaming 目录 (如果找不到，就退回用户的家目录)
+_app_data_dir = os.path.join(os.environ.get('APPDATA', os.path.expanduser("~")), "打赏维权系统")
+# 确保该文件夹存在，如果不存在就自动创建
+os.makedirs(_app_data_dir, exist_ok=True)
+
+# 拼接日志文件的完整路径
+_FAULT_LOG_PATH = os.path.join(_app_data_dir, "faulthandler.log")
 _FAULT_LOG_FILE = open(_FAULT_LOG_PATH, "w", encoding="utf-8")   # 必须保持引用，否则被 GC 关掉
 faulthandler.enable(file=_FAULT_LOG_FILE, all_threads=True)
 
@@ -291,7 +300,9 @@ if __name__ == "__main__":
 
     def exception_hook(exctype, value, tb):
         error_msg = "".join(traceback.format_exception(exctype, value, tb))
-        with open("crash_log.txt", "a", encoding="utf-8") as f:
+        # 使用上面定义好的 _app_data_dir 来保存崩溃日志
+        crash_log_path = os.path.join(_app_data_dir, "crash_log.txt")
+        with open(crash_log_path, "a", encoding="utf-8") as f:
             f.write(f"\n[{datetime.datetime.now()}] 崩溃信息:\n{error_msg}\n")
         sys.__excepthook__(exctype, value, tb)
 

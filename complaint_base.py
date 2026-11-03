@@ -128,6 +128,45 @@ class BaseComplaintRunner:
                 except:
                     pass
 
+    # ==================== 检测个人信息是否填写 ====================
+    def wait_for_info_ready(self, check_ready_func, timeout_sec=300):
+        """
+        极简等待骨架：等子类的检测函数返回 True
+        """
+        self.log("⏳ 正在检查表单信息是否齐全...")
+        waited = 0
+        while True:
+            if self.stop_event and self.stop_event.is_set():
+                return False
+
+            # 只要子类返回 True（信息齐了），就直接跳出等待
+            if check_ready_func():
+                self.log("✅ 信息检查通过！")
+                if self.dialog_signal:
+                    self.dialog_signal.reset_progress()
+                return True
+
+            # 如果没齐，第一次挂起并提示
+            if waited == 0:
+                self.log("⚠️ 发现信息有缺漏，脚本已挂起，请手动补全...")
+                if self.dialog_signal:
+                    # 假设你在 UI 层新增了这个方法（复用或新增）
+                    self.dialog_signal.show_user_handle_required(
+                        "请完善网页上的投诉人资料（含证件扫描件），完成后点击下方【已确认填写】按钮。"
+                    )
+
+            # 等待用户点击小窗按钮触发 login_event
+            if self.login_event:
+                self.login_event.wait(timeout=5)
+                self.login_event.clear()
+            else:
+                time.sleep(5)
+
+            waited += 5
+            if waited >= timeout_sec:
+                self.log(f"❌ 等待填写超时（{timeout_sec}秒）")
+                return False
+
     # ==================== 生命周期统一入口 ====================
     def run(self):
         """统一执行入口，负责资源回收和现场保护"""

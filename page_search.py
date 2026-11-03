@@ -117,35 +117,36 @@ class SearchConsolePage(QWidget):
         # 转发给输入面板更新重试按钮
         self.input_panel.update_parse_state(stats)
 
-    def _on_request_preview(self, db_id, raw_url, category, book_name):
+    def _on_request_preview(self, db_id, raw_url, category, book_name, is_mobile=0):
         if not raw_url:
             return
         self.active_preview_db_id = db_id
 
-        # ★ 核心优化：如果预览窗已经存在，直接在里面换网址！不要关闭重开！
         if getattr(self, 'focus_window', None) and self.focus_window.isVisible():
             from PySide6.QtCore import QUrl
             self.focus_window.setWindowTitle(f"专注预览: {book_name or '未知作品'}")
+            # ★ 新增：UA 模式变了就切（不动窗口布局）
+            cur = int(bool(getattr(self.focus_window, "is_mobile", 0)))
+            if int(bool(is_mobile)) != cur:
+                self.focus_window.set_mobile_mode(is_mobile)
             self.focus_window.web_view.load(QUrl(raw_url))
             return
 
-        # 如果不存在，才走第一次创建的流程
         from app_data import ALL_SUB_PLATFORMS
         available_books = [b["name"] for b in self.input_panel.books_data.values()]
         available_categories = list(ALL_SUB_PLATFORMS)
 
-        # 把右侧面板从主界面摘下来
         main_layout = self.layout()
         main_layout.removeWidget(self.result_panel)
         self.result_panel.setParent(None)
 
-        # 直接弹出 WebView
         from focus_preview_window import BaseFocusWindow
         BaseFocusWindow.launch(
             main_page=self,
             workbench_widget=self.result_panel,
             preview_url=raw_url,
-            title=f"专注预览: {book_name or '未知作品'}"
+            title=f"专注预览: {book_name or '未知作品'}",
+            is_mobile=is_mobile,  # ★ 新增
         )
 
     def on_focus_window_closed(self):

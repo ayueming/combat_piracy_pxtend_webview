@@ -258,7 +258,7 @@ class ImportBooksDialog(QDialog):
 
         msg = f"成功导入 {success} 部作品！\n跳过重复 {duplicate} 部。"
         if invalid > 0:
-            msg += f"\n\n⚠️ 有 {invalid} 条记录因【平台ID/百度CP号 含非法字符】被跳过。"
+            msg += f"\n\n⚠️ 有 {invalid} 条记录因【平台书号/百度CP号 含非法字符】被跳过。"
         QMessageBox.information(self, "导入完成", msg)
         self.accept()
 
@@ -287,7 +287,7 @@ class BooksPage(QWidget):
         tool_layout.setSpacing(10)
 
         # ★ 加上防撑爆提示，且允许它收缩
-        hint = HintButton("平台ID/百度CP号 仅支持英文字母和数字，非法会立即标红。")
+        hint = HintButton("平台书号/百度CP号 仅支持英文字母和数字，非法会立即标红。")
         hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tool_layout.addWidget(hint)
         tool_layout.addStretch()
@@ -319,7 +319,7 @@ class BooksPage(QWidget):
         self.table.setColumnCount(8)
 
         self.table.setHorizontalHeaderLabels(
-            ["选择", "平台ID(必填)", "作品名(必填)", "作品曾用名", "笔名", "权利人(必填)",
+            ["选择", "平台书号(必填)", "作品名(必填)", "作品曾用名", "笔名", "权利人(必填)",
              "百度CP号(必填)", "维权书(必填)"])
 
         # ★ 设置表头高度和列宽模式（与 links 保持一致）
@@ -333,7 +333,7 @@ class BooksPage(QWidget):
 
         # 初始列宽设定
         self.table.setColumnWidth(0, 40)
-        self.table.setColumnWidth(1, 110)  # 平台ID
+        self.table.setColumnWidth(1, 110)  # 平台书号
         self.table.setColumnWidth(2, 180)  # 作品名
         self.table.setColumnWidth(3, 140)  # 作品曾用名
         self.table.setColumnWidth(4, 90)  # 笔名
@@ -572,7 +572,7 @@ class BooksPage(QWidget):
                 conn.commit()
         except sqlite3.IntegrityError as e:
             if "CHECK" in str(e).upper():
-                QMessageBox.warning(self.window(), "格式错误", "平台ID / 百度CP号 仅支持英文字母和数字！")
+                QMessageBox.warning(self.window(), "格式错误", "平台书号 / 百度CP号 仅支持英文字母和数字！")
                 self.refresh_table()
             else:
                 QMessageBox.warning(self.window(), "冲突", "作品名不能重复！")

@@ -4,8 +4,11 @@ from PySide6.QtWidgets import (
     QTabBar, QPushButton, QLabel, QMessageBox, QScrollArea,
     QSizePolicy, QButtonGroup, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PySide6.QtGui import QColor
+from PySide6.QtCore import (
+    Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve,
+    QParallelAnimationGroup, QSignalBlocker
+)
+from PySide6.QtGui import QColor, QGuiApplication, QCursor
 
 from db_config import get_conn
 from app_data import ALL_SUB_PLATFORMS
@@ -27,9 +30,23 @@ from ui_components import NoWheelComboBox
 # =========================================================================
 # Toast 提示
 # =========================================================================
+_ACTIVE_TOASTS = set()   # ★ 模块级保活：防止无 parent 的顶层窗口被 GC
+
 class ToastLabel(QLabel):
     def __init__(self, parent, text, bg_color="#10B981"):
-        super().__init__(text, parent)
+        super().__init__(None)  # 不挂 parent，做成独立顶层窗口
+
+        # ★ 加 Qt.Tool，顶层窗口 + 不占任务栏，比纯 FramelessWindowHint 更稳
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        self.setText(text)
         self.setStyleSheet(f"""
             QLabel {{
                 background-color: {bg_color};
@@ -41,15 +58,29 @@ class ToastLabel(QLabel):
             }}
         """)
         self.setAlignment(Qt.AlignCenter)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.adjustSize()
 
-        parent_rect = parent.rect()
-        x = (parent_rect.width() - self.width()) // 2
-        y = parent_rect.height() - self.height() - 40
+        # ===== 定位：屏幕上方居中 =====
+        screen = None
+        if parent is not None and parent.windowHandle() is not None:
+            screen = parent.windowHandle().screen()
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+
+        geo = screen.availableGeometry()
+        x = geo.x() + (geo.width() - self.width()) // 2
+        y = geo.y() + 60
         self.move(x, y)
 
+        # ★ 关键：加入保活集合，避免 Python GC 回收
+        _ACTIVE_TOASTS.add(self)
+
         self.show()
+        self.raise_()
+
+        # ===== 淡出动画 =====
         self.effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.effect)
         self.anim = QPropertyAnimation(self.effect, b"opacity")
@@ -57,8 +88,12 @@ class ToastLabel(QLabel):
         self.anim.setStartValue(1.0)
         self.anim.setKeyValueAt(0.8, 1.0)
         self.anim.setEndValue(0.0)
-        self.anim.finished.connect(self.deleteLater)
+        self.anim.finished.connect(self._on_anim_finished)
         self.anim.start()
+
+    def _on_anim_finished(self):
+        _ACTIVE_TOASTS.discard(self)   # ★ 动画播完，解除保活
+        self.deleteLater()
 
 
 # =========================================================================
@@ -108,7 +143,7 @@ class DataCard(QFrame):
         self.db_id = record[0]
         self.title = record[1] or "无标题"
         self.body_text = record[2] or ""
-        self.raw_url = record[3] or ""
+        self.raw_url = record[3] or (record[15] if len(record) > 15 else "") or ""
         self.book_name = record[4] or ""
         self.original_category = record[5] or ""
         self.target_platform = record[6] or ""
@@ -116,6 +151,7 @@ class DataCard(QFrame):
         self.source_site = record[8] if len(record) > 8 else ""
         self.pick_origin = record[13] if len(record) > 13 else ""
         self.has_pan = record[14] if len(record) > 14 else 0
+        self.is_mobile = record[17] if len(record) > 17 else 0
 
         self.status = get_card_status(record)
         self.is_manual = (self.pick_origin == "手动获取")
@@ -221,7 +257,7 @@ class DataCard(QFrame):
         lbl_url.setFixedHeight(20)
         lbl_url.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lbl_url.mouseDoubleClickEvent = lambda e: self.parent_panel._preview_card_url(
-            self.db_id, self.raw_url, self.original_category, self.book_name
+            self.db_id, self.raw_url, self.original_category, self.book_name, self.is_mobile
         )
         layout.addWidget(lbl_url)
 
@@ -394,7 +430,7 @@ class CardListWidget(QWidget):
             if records[0][0] == self.all_records[0][0] and records[-1][0] == self.all_records[-1][0]:
                 return
 
-        # 2. 只是少了一条数据（比如入库/删除），不要重建UI，让卡片自己平滑消失
+        # 2. 只是少了一条数据（比如入库/删除），不重建UI，让卡片自己平滑消失
         if len(records) == len(self.all_records) - 1:
             old_ids = [r[0] for r in self.all_records]
             new_ids = [r[0] for r in records]
@@ -403,35 +439,41 @@ class CardListWidget(QWidget):
                 self.all_records = records
                 self.loaded_count -= 1
                 self._update_footer_ui()
-                return  # ★ 直接返回，保持极其丝滑的视觉
+                return  # 保持极其丝滑的视觉
 
-        # ★ 记录当前滚动条的位置（防止刷新时瞬间跳回顶部）
-        current_scroll_value = self.scroll.verticalScrollBar().value()
-
-        # 3. 其他情况（比如翻页、重新搜索等），才重建UI
+        # ★ 3. 整体重建（新增数据、切 Tab 等）
         self.all_records = records
         self.loaded_count = 0
         self.is_loading = False
 
-        # 彻底清空旧卡片
-        while self.card_layout.count():
-            item = self.card_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # ★ 核心：在重建期间屏蔽滚动条信号，防止撑开高度时误触懒加载
+        sb = self.scroll.verticalScrollBar()
+        blocker = QSignalBlocker(sb)
 
-        if not self.all_records:
-            lbl_empty = QLabel("暂无数据")
-            lbl_empty.setAlignment(Qt.AlignCenter)
-            lbl_empty.setStyleSheet("color: #9CA3AF; font-size: 14px; margin-top: 50px; border: none;")
-            self.card_layout.addWidget(lbl_empty)
-            self._update_footer_ui()
-            return
+        try:
+            # 彻底清空旧卡片
+            while self.card_layout.count():
+                item = self.card_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
 
-        self._load_more()
+            if not self.all_records:
+                lbl_empty = QLabel("暂无数据")
+                lbl_empty.setAlignment(Qt.AlignCenter)
+                lbl_empty.setStyleSheet("color: #9CA3AF; font-size: 14px; margin-top: 50px; border: none;")
+                self.card_layout.addWidget(lbl_empty)
+                self._update_footer_ui()
+                sb.setValue(0)  # 空数据也回顶
+                return
 
-        # ★ 恢复滚动条位置（如果原位置有效的话）
-        if self.loaded_count > 0:
-            self.scroll.verticalScrollBar().setValue(current_scroll_value)
+            self._load_more()
+
+            # ★ 核心：重建后强制回到顶部
+            sb.setValue(0)
+
+        finally:
+            # 解除信号屏蔽
+            del blocker
 
     def _on_scroll(self, value):
         if self.is_loading or not self.all_records:
@@ -450,18 +492,14 @@ class CardListWidget(QWidget):
         end_idx = min(start_idx + self.chunk_size, len(self.all_records))
         page_records = self.all_records[start_idx:end_idx]
 
-        # 判断用户是否在底部（用来决定动画结束后要不要自动滚动）
-        sb = self.scroll.verticalScrollBar()
-        is_near_bottom = (sb.maximum() - sb.value() < 100)
+        # ★ 删掉了 is_near_bottom 的判定和底部的平滑滚动逻辑
 
-        # ★ 动画组管理列表，防止被GC回收
         self.anim_groups = getattr(self, 'anim_groups', [])
 
         for i, r in enumerate(page_records):
             global_idx = start_idx + i + 1
             card = DataCard(global_idx, r, self.mode, self.parent_panel)
 
-            # ★ 核心视觉欺骗：初始高度为 1，完全透明
             card.setMaximumHeight(1)
             card.opacity_effect = QGraphicsOpacityEffect(card)
             card.setGraphicsEffect(card.opacity_effect)
@@ -469,38 +507,29 @@ class CardListWidget(QWidget):
 
             self.card_layout.addWidget(card)
 
-            # 1. 高度从 1 撑开到 185 (模拟从下往上挤出来的物理滑动)
             anim_height = QPropertyAnimation(card, b"maximumHeight")
             anim_height.setDuration(400)
             anim_height.setStartValue(1)
             anim_height.setEndValue(185)
-            anim_height.setEasingCurve(QEasingCurve.OutCubic)  # 缓出，起步快，末端慢
+            anim_height.setEasingCurve(QEasingCurve.OutCubic)
 
-            # 2. 透明度从 0 到 1，配合高度变化
             anim_opacity = QPropertyAnimation(card.opacity_effect, b"opacity")
             anim_opacity.setDuration(400)
             anim_opacity.setStartValue(0.0)
             anim_opacity.setEndValue(1.0)
 
-            # 把两个动画并行
             group = QParallelAnimationGroup(card)
             group.addAnimation(anim_height)
             group.addAnimation(anim_opacity)
 
-            # 动画结束后清理引用
             group.finished.connect(lambda g=group: self.anim_groups.remove(g) if g in self.anim_groups else None)
             self.anim_groups.append(group)
 
-            # ★ 错峰启动：每张卡片延迟 50 毫秒。第一张0ms，第二张50ms...
             QTimer.singleShot(i * 50, group.start)
 
         self.loaded_count = end_idx
         self.is_loading = False
         self._update_footer_ui()
-
-        # ★ 如果用户已经在最底部，随着卡片高度撑开，要把滚动条平滑推到最下面，视觉上就是往上滑动
-        if is_near_bottom:
-            QTimer.singleShot(50, self._smooth_scroll_to_bottom)
 
     def _smooth_scroll_to_bottom(self):
         sb = self.scroll.verticalScrollBar()
@@ -532,7 +561,7 @@ class CardListWidget(QWidget):
 # 右侧分拣面板
 # =========================================================================
 class SearchResultPanel(QWidget):
-    request_preview = Signal(int, str, str, str)
+    request_preview = Signal(int, str, str, str, int)
     stats_updated = Signal(dict)
 
     def __init__(self, main_page, parent=None):
@@ -824,8 +853,8 @@ class SearchResultPanel(QWidget):
             if hasattr(self.main_page.main_window, 'links_page'):
                 self.main_page.main_window.links_page.refresh_table()
 
-    def _preview_card_url(self, db_id, raw_url, category, book_name=""):
-        self.request_preview.emit(db_id, raw_url, category, book_name)
+    def _preview_card_url(self, db_id, raw_url, category, book_name="", is_mobile=0):
+        self.request_preview.emit(db_id, raw_url, category, book_name, is_mobile)
 
     def delete_selected_drafts(self):
         current_index = self.tab_bar.currentIndex()

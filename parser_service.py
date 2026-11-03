@@ -9,7 +9,7 @@ from app_data.crawl_status_consts import CRAWL_STATUS_PENDING
 
 class ParserSignals(QObject):
     parse_started = Signal(str, int)
-    parse_finished = Signal(bool)
+    parse_finished = Signal(bool, str)
 
 
 parser_signals = ParserSignals()
@@ -74,11 +74,12 @@ def _worker():
                     break  # 彻底干净了，跳出循环
 
             print(f"✅ batch={batch_id} 解析完成！")
-            parser_signals.parse_finished.emit(True)
+            parser_signals.parse_finished.emit(True, batch_id)
+
 
         except Exception as e:
             print(f"❌ batch={batch_id} 解析失败: {e}")
-            parser_signals.parse_finished.emit(False)
+            parser_signals.parse_finished.emit(False, batch_id)
         finally:
             _parse_queue.task_done()
 

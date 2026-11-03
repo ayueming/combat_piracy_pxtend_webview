@@ -15,6 +15,17 @@ from app_data import ALL_SUB_PLATFORMS
 
 
 # ==========================================
+# UA 常量
+# ==========================================
+_DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/120.0.0.0 Safari/537.36")
+_MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+              "Version/16.6 Mobile/15E148 Safari/604.1")
+
+
+# ==========================================
 # 1. 通信桥梁：接收网页 JS 发来的指令
 # ==========================================
 class JsBridge(QObject):
@@ -33,6 +44,11 @@ class JsBridge(QObject):
                 "pick_origin": "手动获取",
                 "source_platform": category or "WebView预览",
             }
+
+            # ★ 新增：沿用当前预览窗口的 UA 模式
+            fw = getattr(self.main_page, "focus_window", None)
+            if fw is not None:
+                ctx["is_mobile"] = int(getattr(fw, "is_mobile", 0))
 
             source_site = ""
             try:
@@ -64,16 +80,31 @@ class JsBridge(QObject):
         from parser_service import trigger_parse
         trigger_parse(batch_id or current_context.get("batch_id", ""), only_manual=True)
 
+    # ★ 新增：切换预览窗口的 UA 模式
+    @Slot(str)
+    def switch_ua(self, mode):
+        """切换预览窗口的 UA 模式。mode: '0' 桌面 / '1' 移动"""
+        fw = getattr(self.main_page, "focus_window", None)
+        if fw is None:
+            return
+        try:
+            target = int(mode)
+        except (TypeError, ValueError):
+            return
+        fw.set_mobile_mode(target)
+        fw.web_view.reload()   # reload 后 _on_load_finished 会重新注入 picker，按钮文字自动更新
+
 
 # ==========================================
 # 2. 预览窗口 (基于 QWebEngineView)
 # ==========================================
 class BaseFocusWindow(QWidget):
-    def __init__(self, main_page, workbench_widget, preview_url="", title="专注预览 (按 Esc 退出)"):
+    def __init__(self, main_page, workbench_widget, preview_url="", title="专注预览 (按 Esc 退出)", is_mobile=0):
         super().__init__()
         self.main_page = main_page
         self.workbench_widget = workbench_widget
         self.preview_url = preview_url
+        self.is_mobile = int(bool(is_mobile))   # ★ 必须早于 _setup_persistent_profile
         self._closed_handled = False
 
         self.setWindowTitle(title)
@@ -84,7 +115,7 @@ class BaseFocusWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ---------- 左侧：WebView 容器 ----------
+        # ---------- 左侧：WebView 容器（布局永远不变） ----------
         web_container = QWidget()
         web_layout = QVBoxLayout(web_container)
         web_layout.setContentsMargins(0, 0, 0, 0)
@@ -123,7 +154,7 @@ class BaseFocusWindow(QWidget):
         self.web_view.loadFinished.connect(self._on_load_finished)
 
     def _setup_persistent_profile(self):
-        """配置持久化存储，保存登录状态和 Cookie"""
+        """配置持久化存储，保存登录状态和 Cookie；按 is_mobile 选择 UA"""
         user_id = get_current_user()
         base_dir = get_user_dir(user_id) if user_id else os.path.expanduser("~")
         profile_dir = os.path.join(base_dir, "webview_profile")
@@ -133,16 +164,27 @@ class BaseFocusWindow(QWidget):
         self.profile.setPersistentStoragePath(os.path.join(profile_dir, "storage"))
         self.profile.setCachePath(os.path.join(profile_dir, "cache"))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
-        self.profile.setHttpUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        # ★ 按 is_mobile 选 UA
+        self.profile.setHttpUserAgent(_MOBILE_UA if self.is_mobile else _DESKTOP_UA)
 
         page = QWebEnginePage(self.profile, self.web_view)
         self.web_view.setPage(page)
 
+    # ★ 新增：运行时切换 UA（不改窗口布局）
+    def set_mobile_mode(self, is_mobile):
+        """仅切换 profile 的 UA，不改窗口布局、不改 right_panel 宽度。
+        调用方负责在必要时 reload（load() 会自动带新 UA 发请求）。"""
+        target = int(bool(is_mobile))
+        if target == self.is_mobile:
+            return
+        self.is_mobile = target
+        if hasattr(self, "profile") and self.profile is not None:
+            self.profile.setHttpUserAgent(_MOBILE_UA if target else _DESKTOP_UA)
+
     def _on_load_finished(self, ok):
         if not ok: return
 
-        # ★ 修复核心：先加载 QWebChannel 的底层库！
+        # ★ 先加载 QWebChannel 的底层库！
         file = QFile(":/qtwebchannel/qwebchannel.js")
         if file.open(QIODevice.ReadOnly):
             js_channel = bytes(file.readAll()).decode('utf-8')
@@ -162,7 +204,8 @@ class BaseFocusWindow(QWidget):
             "keyword": current_context.get("keyword", ""),
             "batch_id": current_context.get("batch_id", ""),
             "books": books,
-            "categories": list(ALL_SUB_PLATFORMS)
+            "categories": list(ALL_SUB_PLATFORMS),
+            "is_mobile": int(self.is_mobile),   # ★ 新增
         }
 
         # 注入完整版拾取器
@@ -213,6 +256,8 @@ class BaseFocusWindow(QWidget):
                     .btn-save-page:hover {{ background: #eaeef2; }}
                     .btn-pick {{ background: #f6f8fa; color: #24292f; border-color: #d0d7de; }}
                     .btn-pick.active {{ background: #fff8c5; border-color: #d4a72c; color: #7d4e00; }}
+                    .btn-ua-toggle {{ background: #f6f8fa; color: #24292f; border-color: #d0d7de; margin-top: 4px; }}
+                    .btn-ua-toggle:hover {{ background: #eaeef2; }}
                     .btn-save-batch {{ background: #10B981; color: #fff; margin-top: 4px; }}
                     .btn-save-batch:hover {{ background: #059669; }}
                     .status {{ padding: 6px 10px; background: #f6f8fa; color: #57606a; font-size: 11px; }}
@@ -231,6 +276,7 @@ class BaseFocusWindow(QWidget):
                     <div class="actions">
                         <button class="btn-save-page" id="btn-save-page">仅保存当前网址</button>
                         <button class="btn-pick" id="btn-pick">手动拾取链接（或按住ALT）</button>
+                        <button class="btn-ua-toggle" id="btn-ua-toggle"></button>
                         <button class="btn-save-batch" id="btn-save-batch">💾 保存本批</button>
                     </div>
                     <div class="status">待保存 <b id="apt-count">0</b> 条</div>
@@ -285,6 +331,7 @@ class BaseFocusWindow(QWidget):
                 const btnPick = shadow.getElementById("btn-pick");
                 const btnSavePage = shadow.getElementById("btn-save-page");
                 const btnSaveBatch = shadow.getElementById("btn-save-batch");
+                const btnUAToggle = shadow.getElementById("btn-ua-toggle");
                 const countEl = shadow.getElementById("apt-count");
                 let savedCount = 0;
 
@@ -370,12 +417,22 @@ class BaseFocusWindow(QWidget):
                         savedCount = 0; countEl.textContent = "0";
                     }}
                 }});
+
+                // ★ 新增：UA 切换按钮
+                btnUAToggle.textContent = ctx.is_mobile
+                    ? "🖥️ 切换到桌面 UA"
+                    : "📱 切换到移动 UA";
+                btnUAToggle.addEventListener("click", () => {{
+                    if (!window.pyBridge) return;
+                    const target = btnUAToggle.textContent.includes("桌面") ? "0" : "1";
+                    window.pyBridge.switch_ua(target);
+                }});
             }}
         }})();
         """
 
     @classmethod
-    def launch(cls, main_page, workbench_widget, preview_url, title="专注预览"):
+    def launch(cls, main_page, workbench_widget, preview_url, title="专注预览", is_mobile=0):
         if not preview_url: return None
         if not check_and_lock("previewing"):
             QMessageBox.warning(main_page, "提示", "后台正在执行自动任务，请等待完成后再预览。")
@@ -384,7 +441,7 @@ class BaseFocusWindow(QWidget):
         if getattr(main_page, 'focus_window', None):
             main_page.focus_window.close()
 
-        win = cls(main_page, workbench_widget, preview_url, title)
+        win = cls(main_page, workbench_widget, preview_url, title, is_mobile=is_mobile)
         main_page.focus_window = win
 
         screen_rect = QApplication.primaryScreen().availableGeometry()

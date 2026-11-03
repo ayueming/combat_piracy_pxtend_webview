@@ -127,8 +127,15 @@ async def _handle_manual_pick(websocket, data):
 async def main():
     print("🚀 WebSocket 后台控制台已启动，监听 8080 端口...")
     logging.getLogger('websockets').setLevel(logging.CRITICAL)
-    async with websockets.serve(echo, "127.0.0.1", 8080):
-        await asyncio.Future()
+    try:
+        async with websockets.serve(echo, "127.0.0.1", 8080):
+            await asyncio.Future()
+    except OSError as e:
+        if e.errno == 10048:
+            print("❌ [致命错误] 端口 8080 被占用，请检查是否已打开本软件，或重启电脑！")
+            # 如果有需要，也可以在这里弹个 QMessageBox 提示用户
+        else:
+            raise
 
 
 def run_loop():

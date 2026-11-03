@@ -24,7 +24,7 @@ from ui_components import (
 from complaint_service import prepare_complaints_data
 
 from app_data import PLATFORM_CONFIG, ALL_SUB_PLATFORMS, CAT_TO_CODE_MAP, PLATFORM_OTHER
-from app_data.complaint_platform_consts import HIDDEN_MAIN_CATEGORIES
+from app_data.complaint_platform_consts import HIDDEN_MAIN_CATEGORIES, HIDDEN_SUB_PLATFORMS
 from app_data.crawl_status_consts import CRAWL_STATUS_DONE
 
 from ui_styles import (
@@ -308,7 +308,7 @@ class LinksPage(QWidget):
         btn_layout_sub.setSpacing(8)
 
         for sub_name in ALL_SUB_PLATFORMS:
-            if sub_name in HIDDEN_MAIN_CATEGORIES:
+            if sub_name in HIDDEN_SUB_PLATFORMS:
                 continue
             btn = QPushButton(sub_name)
             btn.setCheckable(True)

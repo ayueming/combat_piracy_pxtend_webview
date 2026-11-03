@@ -76,7 +76,10 @@ DRAFT_LINKS_COLUMNS_SQL = """(
     duplicate_of_table  TEXT,
     has_pan             INTEGER DEFAULT 0,
     parent_url          TEXT,
-    parent_title        TEXT
+    parent_title        TEXT,
+    is_mobile           INTEGER DEFAULT 0,
+    first_url           TEXT,
+    second_url          TEXT
 )"""
 
 # 26 列并集：init_db 版 ∪ ensure_db_columns 版
@@ -107,7 +110,8 @@ SITES_COLUMNS_SQL = """(
     relevance_hits      TEXT,
     original_title      TEXT,
     parent_url          TEXT,
-    parent_title        TEXT
+    parent_title        TEXT,
+    is_mobile           INTEGER DEFAULT 0
 )"""
 
 
@@ -236,18 +240,23 @@ def _ensure_books(conn, cursor):
 
 def _ensure_sites(conn, cursor):
     cursor.execute(f"CREATE TABLE IF NOT EXISTS sites {SITES_COLUMNS_SQL}")
-    # 老库差集兜底（新库全部跳过）
     for col_name, col_type in [
-        # 原 init_db 老库缺的 9 列
         ("body_text", "TEXT"), ("source_site", "TEXT"), ("batch_id", "TEXT"),
         ("domain_matched", "INTEGER DEFAULT 0"), ("relevance", "REAL DEFAULT 0"),
         ("relevance_hits", "TEXT"), ("original_title", "TEXT"),
         ("parent_url", "TEXT"), ("parent_title", "TEXT"),
-        # 原 ensure_db_columns 老库缺的 3 列
         ("complaint_time", "TEXT"), ("resource_status", "TEXT"), ("match_status", "TEXT DEFAULT ''"),
         ("target_platform", "TEXT DEFAULT ''"),
+        ("is_mobile", "INTEGER DEFAULT 0"),
+        ("first_url", "TEXT"),  # ★ 新增
+        ("second_url", "TEXT"),  # ★ 新增
     ]:
         _add_column_if_missing(cursor, "sites", col_name, col_type)
+
+    # ★ 新增：为了 OR 查询走索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_first_url    ON sites(first_url)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_second_url   ON sites(second_url)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_feature_code ON sites(feature_code)")
     conn.commit()
 
 
@@ -256,6 +265,10 @@ def _ensure_draft_links(conn, cursor):
     # 老库补齐新增列
     _add_column_if_missing(cursor, "draft_links", "parent_url", "TEXT")
     _add_column_if_missing(cursor, "draft_links", "parent_title", "TEXT")
+    _add_column_if_missing(cursor, "draft_links", "is_mobile", "INTEGER DEFAULT 0")
+    _add_column_if_missing(cursor, "draft_links", "first_url", "TEXT")  # ★ 新增
+    _add_column_if_missing(cursor, "draft_links", "second_url", "TEXT")  # ★ 新增
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_draft_links_batch   ON draft_links(batch_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_draft_links_status  ON draft_links(crawl_status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_draft_links_feature ON draft_links(feature_code)")
@@ -305,10 +318,25 @@ def _ensure_evidences(conn, cursor):
 
 def _ensure_ignored_links(conn, cursor):
     cursor.execute('''CREATE TABLE IF NOT EXISTS ignored_links
-                      (id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                       site_url TEXT UNIQUE,
-                       add_time TEXT)''')
+                      (
+                          id
+                          INTEGER
+                          PRIMARY
+                          KEY
+                          AUTOINCREMENT,
+                          site_url
+                          TEXT
+                          UNIQUE,
+                          add_time
+                          TEXT
+                      )''')
     _add_column_if_missing(cursor, "ignored_links", "title", "TEXT")
+    _add_column_if_missing(cursor, "ignored_links", "first_url", "TEXT")  # ★ 新增
+    _add_column_if_missing(cursor, "ignored_links", "second_url", "TEXT")  # ★ 新增
+
+    # ★ 新增：为了 OR 查询走索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ignored_first_url  ON ignored_links(first_url)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ignored_second_url ON ignored_links(second_url)")
     conn.commit()
 
 

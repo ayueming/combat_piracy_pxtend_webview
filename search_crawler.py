@@ -3,6 +3,8 @@ import os
 import random
 import time
 
+from rate_limiter import global_limiter
+
 
 # ★ 开关：False = 不向 UI 发逐条进度信号（只保留控制台 print）
 #   原因：跨线程 emit 到 UI 弹窗，在"任务交替"时可能撞上弹窗生命周期问题
@@ -58,6 +60,7 @@ class SearchCrawler:
                     page.set_viewport_size({"width": 1280, "height": 800})
 
                     self._log(f"🔍 正在打开: {task['url']}")
+                    global_limiter.wait()
                     page.goto(task["url"], wait_until="domcontentloaded", timeout=30000)
                     page.add_script_tag(content=self.scanner_js)
                     page.wait_for_timeout(1500)
@@ -104,9 +107,12 @@ class SearchCrawler:
                         # 抓首屏
                         try:
                             self._ensure_scanner_loaded(page)
-                            current_links = page.evaluate(
-                                "window.__apt_scanner_strategies.scanTieba()" if scanner_type == "tieba" else "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)",
-                                strategy)
+                            if scanner_type == "tieba":
+                                current_links = page.evaluate(
+                                    "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
+                            else:
+                                current_links = page.evaluate(
+                                    "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
                             if current_links:
                                 for link in current_links:
                                     url = link.get("url")
@@ -136,7 +142,7 @@ class SearchCrawler:
                             try:
                                 self._ensure_scanner_loaded(page)
                                 if scanner_type == "tieba":
-                                    current_links = page.evaluate("window.__apt_scanner_strategies.scanTieba()")
+                                    current_links = page.evaluate("(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
                                 else:
                                     current_links = page.evaluate(
                                         "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
@@ -200,7 +206,7 @@ class SearchCrawler:
                             try:
                                 self._ensure_scanner_loaded(page)
                                 if scanner_type == "tieba":
-                                    current_links = page.evaluate("window.__apt_scanner_strategies.scanTieba()")
+                                    current_links = page.evaluate("(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
                                 else:
                                     current_links = page.evaluate(
                                         "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
@@ -248,17 +254,25 @@ class SearchCrawler:
                                         next_btn.scroll_into_view_if_needed()
                                         page.wait_for_timeout(200)
 
-                                        box = next_btn.bounding_box()
-                                        if box:
-                                            click_x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-                                            click_y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-                                            page.mouse.move(click_x, click_y, steps=random.randint(5, 10))
-                                            page.wait_for_timeout(random.randint(100, 300))
-                                            page.mouse.click(click_x, click_y)
+                                        href = next_btn.get_attribute("href")
+                                        if href and href.startswith("http"):
+                                            self._log(f"🔗 提取到下一页链接，直接跳转: {href[:50]}...", page_num,
+                                                      max_pages)
+                                            global_limiter.wait()
+                                            page.goto(href, wait_until="domcontentloaded", timeout=15000)
                                         else:
-                                            next_btn.click(timeout=5000)
+                                            # 兜底：如果没有 href，用鼠标模拟点击
+                                            box = next_btn.bounding_box()
+                                            if box:
+                                                click_x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+                                                click_y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+                                                page.mouse.move(click_x, click_y, steps=random.randint(5, 10))
+                                                page.wait_for_timeout(random.randint(100, 300))
+                                                page.mouse.click(click_x, click_y)
+                                            else:
+                                                next_btn.click(timeout=5000)
 
-                                        page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                        page.wait_for_load_state("domcontentloaded", timeout=15000)
                                         self._ensure_scanner_loaded(page)
                                     else:
                                         self._log("⚠️ 未找到可用的下一页按钮，提前结束翻页", page_num, max_pages)
@@ -286,5 +300,5 @@ class SearchCrawler:
 
                 self._log(f"❌ 搜索执行异常: {e}")
                 if final_links_map: return list(final_links_map.values())
-                return []
+                raise e
         return list(final_links_map.values()) if final_links_map else []

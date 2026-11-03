@@ -11,20 +11,37 @@ class TaskRow(QFrame):
         self.data = data
         self.setObjectName("TaskRow")
 
+        # 获取上次执行时间和状态
+        status = data.get("status", "ready")
+        last_run = data.get("last_run_at") or ""
+
+        # 纯文本结果映射，无 emoji
+        result_text = ""
+        result_color = "#6B7280"  # 默认灰
+        if status == "failed":
+            result_text = "超时"
+            result_color = "#EF4444"  # 红色
+        elif status == "stopped":
+            result_text = "中断"
+            result_color = "#F59E0B"  # 橙色
+        elif status == "ready" and last_run:
+            result_text = "成功"
+            result_color = "#10B981"  # 绿色
+
+        # 左侧边框颜色（保留 running 的蓝色提示）
         border_color = "#E5E7EB"
-        if data["status"] == "running":
-            border_color = "#10B981"
-        elif data["status"] == "failed":
-            border_color = "#EF4444"
+        if status == "running":
+            border_color = "#3B82F6"
 
         self.setStyleSheet(
             f"#TaskRow {{ background: #FFF; border: 1px solid #E5E7EB; border-left: 3px solid {border_color}; border-radius: 4px; }}")
-        self.setFixedHeight(65)
+        self.setFixedHeight(85)  # ★ 加高以容纳三行
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(2)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(4)
 
+        # ===== 第一行：主关键词 + 平台页数 + 按钮 =====
         top = QHBoxLayout()
         top.setSpacing(4)
 
@@ -32,8 +49,9 @@ class TaskRow(QFrame):
         lbl_index.setStyleSheet("color: #9CA3AF; font-size: 12px; font-weight: bold; border: none;")
         top.addWidget(lbl_index)
 
-        lbl_title = QLabel(f"《{data['book_name']}》 {data['platform']} {data['max_pages']}页")
-        lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #374151; border: none;")
+        # ★ 去掉了书名，改为显示主关键词
+        lbl_title = QLabel(f"{data['main_keyword']}  |  {data['platform']} {data['max_pages']}页")
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #374151; border: none;")
         top.addWidget(lbl_title)
         top.addStretch()
 
@@ -45,7 +63,7 @@ class TaskRow(QFrame):
         btn_run.clicked.connect(self._on_run)
 
         btn_del = QPushButton("×")
-        btn_del.setFixedSize(28, 28)
+        btn_del.setFixedSize(24, 24)
         btn_del.setStyleSheet(
             "QPushButton { background: transparent; color: #9CA3AF; border: none; font-size: 18px; font-weight: bold; } QPushButton:hover { color: #EF4444; }")
         btn_del.setCursor(Qt.PointingHandCursor)
@@ -55,12 +73,30 @@ class TaskRow(QFrame):
         top.addWidget(btn_del)
         lay.addLayout(top)
 
-        # ★ 第二行：主词 + 副词
-        sub_text = " ".join(data["sub_keywords"]) if data["sub_keywords"] else "无副关键词"
-        lbl_sub = QLabel(f" {data['main_keyword']}  |  {sub_text}")
+        # ===== 第二行：副关键词 =====
+        sub_text = " ".join(data["sub_keywords"]) if data["sub_keywords"] else "无"
+        lbl_sub = QLabel(f"副关键词：{sub_text}")
         lbl_sub.setStyleSheet("color: #6B7280; font-size: 11px; border: none; margin-left: 16px;")
         lbl_sub.setToolTip(lbl_sub.text())
         lay.addWidget(lbl_sub)
+
+        # ===== 第三行：上次执行时间和执行结果 =====
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(16, 0, 0, 0)  # 左边距对齐
+
+        # 只有跑过（有 last_run）才显示，没跑过留空
+        if last_run and result_text:
+            lbl_time = QLabel(last_run)
+            lbl_time.setStyleSheet("color: #9CA3AF; font-size: 11px; border: none;")
+            bottom.addWidget(lbl_time)
+
+            lbl_result = QLabel(result_text)
+            lbl_result.setStyleSheet(
+                f"color: {result_color}; font-size: 11px; font-weight: bold; border: none; margin-left: 8px;")
+            bottom.addWidget(lbl_result)
+
+        bottom.addStretch()
+        lay.addLayout(bottom)
 
     def _on_run(self):
         if self.data["status"] == "running":

@@ -12,6 +12,7 @@ COPYRIGHT_WHITELIST_DOMAINS = [
     "ciweimao.com",    # 刺猬猫
     "faloo.com",       # 飞卢小说网
     "hongxiu.com",     # 红袖添香
+    "baike.baidu.com", # 百度百科
 ]
 
 # 标题 / 发布者 双文本匹配用的全名关键词（避免简称误伤标题）
@@ -22,6 +23,7 @@ COPYRIGHT_WHITELIST_KEYWORDS = [
     "刺猬猫",
     "飞卢小说网",
     "红袖添香",
+    "百度百科"
 ]
 
 # 仅用于「发布者」字段的简称（发布者通常就是站名简称，标题里不用，防误伤）

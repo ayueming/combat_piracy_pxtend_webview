@@ -18,12 +18,13 @@ from app_data.crawl_status_consts import (
 
 _SELECT_FIELDS = ("id, name, body_text, site_url, book_name, category, target_platform, "
                   "fetch_time, source_site, relevance, relevance_hits, "
-                  "crawl_status, domain_matched, attr, has_pan")  # draft link表和site表独立，不需要去查site表
+                  "crawl_status, domain_matched, attr, has_pan, "
+                  "first_url, second_url, is_mobile")
 
-# 归档表字段（没有 has_pan，保持原样）
 _SELECT_FIELDS_SITES = ("id, name, body_text, site_url, book_name, category, target_platform, "
                         "fetch_time, source_site, relevance, relevance_hits, "
-                        "crawl_status, domain_matched, attr, original_title")
+                        "crawl_status, domain_matched, attr, original_title, "
+                        "first_url, second_url, is_mobile")
 
 def _build_cond(batch_id):
     if batch_id == "LEGACY_BATCH":

@@ -6,7 +6,8 @@ from PySide6.QtWidgets import QMessageBox
 from db_config import get_conn
 from ws_server import current_context, dispatch_search_task, ws_signals
 from plugin_bridge import bridge_signals
-
+from parser_service import parser_signals
+from rate_limiter import global_limiter
 
 class QueueSignals(QObject):
     queue_updated = Signal()
@@ -27,6 +28,9 @@ class SearchTaskQueue(QObject):
         self._session_batch_id = None
         self._ui_notified_batch = None
 
+        self._is_waiting_for_parse = False
+        self._current_parsing_batch_id = None
+
         # 兜底任务超时定时器（5分钟）
         self.timeout_timer = QTimer(self)
         self.timeout_timer.setSingleShot(True)
@@ -38,6 +42,8 @@ class SearchTaskQueue(QObject):
         self.disconnect_timer.timeout.connect(self._force_abort_on_disconnect)
 
         ws_signals.search_finished.connect(self._on_search_finished)
+
+        parser_signals.parse_finished.connect(self._on_parse_finished)
 
         # 监听插件连接状态
         bridge_signals.plugin_disconnected.connect(self._on_plugin_disconnected)
@@ -83,6 +89,8 @@ class SearchTaskQueue(QObject):
 
         self.is_running = False
         self._running_tasks.clear()
+        self._is_waiting_for_parse = False
+        self._current_parsing_batch_id = None
 
         if self.timeout_timer.isActive():
             self.timeout_timer.stop()
@@ -105,12 +113,14 @@ class SearchTaskQueue(QObject):
     def get_tasks(self):
         conn = get_conn()
         try:
+            # ★ 增加 last_run_at
             rows = conn.execute(
-                "SELECT id, book_id, book_name, platform, main_keyword, sub_keywords, max_pages, status, last_batch_id FROM search_tasks ORDER BY id ASC").fetchall()
+                "SELECT id, book_id, book_name, platform, main_keyword, sub_keywords, max_pages, status, last_batch_id, last_run_at FROM search_tasks ORDER BY id ASC").fetchall()
             return [{
                 "id": r[0], "book_id": r[1], "book_name": r[2], "platform": r[3],
                 "main_keyword": r[4], "sub_keywords": json.loads(r[5]) if r[5] else [],
-                "max_pages": r[6], "status": r[7], "last_batch_id": r[8]
+                "max_pages": r[6], "status": r[7], "last_batch_id": r[8],
+                "last_run_at": r[9]  # ★ 传给 UI
             } for r in rows]
         finally:
             conn.close()
@@ -161,7 +171,7 @@ class SearchTaskQueue(QObject):
 
         conn = get_conn()
         try:
-            conn.execute("UPDATE search_tasks SET status = 'ready' WHERE status = 'failed'")
+            conn.execute("UPDATE search_tasks SET status = 'ready' WHERE status IN ('failed', 'stopped')")
             conn.commit()
         finally:
             conn.close()
@@ -186,15 +196,17 @@ class SearchTaskQueue(QObject):
     def stop(self):
         self.is_running = False
         self._running_tasks.clear()
+        self._is_waiting_for_parse = False
+        self._current_parsing_batch_id = None
         if self.timeout_timer.isActive():
             self.timeout_timer.stop()
         if self._current_task_id:
-            self._set_status(self._current_task_id, 'ready')
+            # ★ 修改点：把 'ready' 改为 'stopped'
+            self._set_status(self._current_task_id, 'stopped')
             self._current_task_id = None
 
         self._session_batch_id = None
         self._ui_notified_batch = None
-
         queue_signals.queue_updated.emit()
 
     def _execute_next(self):
@@ -245,11 +257,21 @@ class SearchTaskQueue(QObject):
             return
 
         self.timeout_timer.stop()
+
+        if batch_id.startswith("ERROR_"):
+            print(f"[Queue] ❌ 任务执行失败/超时，跳过解析，标记失败。")
+            self._set_status(self._current_task_id, 'failed')
+            self._current_task_id = None
+            self._execute_next()  # 强行唤醒队列执行下一个
+            return
+
         self._update_batch_id(self._current_task_id, batch_id)
         self._set_status(self._current_task_id, 'ready')
         self._current_task_id = None
 
-        QTimer.singleShot(1000, self._execute_next)
+        self._is_waiting_for_parse = True
+        self._current_parsing_batch_id = batch_id
+        print(f"[Queue] ⏸️ 搜索完成，队列挂起，等待批次 {batch_id} 解析完成...")
 
     def _on_task_timeout(self):
         if self._current_task_id:
@@ -292,6 +314,26 @@ class SearchTaskQueue(QObject):
     def init_cleanup(self):
         """供外部在数据库初始化完成后调用，清理残留任务"""
         self._cleanup_orphans()
+
+    def _on_parse_finished(self, success, batch_id):
+        # 如果队列没在运行，或者不在等待解析状态，直接忽略
+        if not self.is_running or not self._is_waiting_for_parse:
+            return
+
+        # ★ 核心新增：如果收到的不是当前正在等待的批次，直接无视！
+        if batch_id != self._current_parsing_batch_id:
+            return
+
+        self._is_waiting_for_parse = False
+        self._current_parsing_batch_id = None
+
+        if success:
+            print(f"[Queue] ▶️ 批次 {batch_id} 解析完成，队列恢复，准备执行下一个任务...")
+        else:
+            print(f"[Queue] ⚠️ 批次 {batch_id} 解析失败/异常退出，为防死锁，强行唤醒队列...")
+
+        # 只调用一次！
+        self._execute_next()
 
 
 task_queue = SearchTaskQueue()

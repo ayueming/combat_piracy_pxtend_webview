@@ -17,7 +17,7 @@ from app_state import app_state
 from app_signals import ws_signals
 from link_ingest_service import save_picked_link
 from parser_service import trigger_parse
-from app_data.search_templates import get_search_url
+from app_data.search_templates import get_search_url, SEARCH_TEMPLATES
 from app_data.ext_search_strategies import get_ext_strategy
 from plugin_bridge import bridge, ensure_ready
 
@@ -56,6 +56,10 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
     url = get_search_url(platform, query_for_url)
     strategy = get_ext_strategy(platform)
 
+    config = SEARCH_TEMPLATES.get(platform, {})
+    real_platform = config.get("real_platform", platform)
+    is_mobile = config.get("is_mobile", False)
+
     batch_id = app_state.current_context.get("batch_id") or \
         f"{platform}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -64,6 +68,8 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
         "task_id": _make_task_id(platform),
         "batch_id": batch_id,
         "platform": platform,
+        "real_platform": real_platform,
+        "is_mobile": is_mobile,
         "keyword": keyword,
         "book_name": app_state.current_context.get("book_name", ""),
         "max_pages": max_pages,
@@ -75,7 +81,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
         book_name=task["book_name"],
         keyword=task["keyword"],
         batch_id=task["batch_id"],
-        source_platform=platform,
+        source_platform=real_platform,
     )
 
     ws_signals.scan_state_changed.emit("scanning")
@@ -88,7 +94,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
 
     def _run_playwright():
         try:
-            if not ensure_ready(business_name="搜索抓取", timeout=15.0):
+            if not ensure_ready(business_name="搜索抓取", timeout=8.0):
                 raise RuntimeError("浏览器启动或 CDP 接管失败")
 
             from browser_manager import BrowserManager
@@ -103,7 +109,8 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
             if links:
                 new_count = 0
                 ctx = {
-                    "source_platform": task["platform"],
+                    "source_platform": real_platform,
+                    "is_mobile": is_mobile,
                     "keyword": task["keyword"],
                     "book_name": task["book_name"],
                     "batch_id": task["batch_id"],
@@ -133,7 +140,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
             print(f"❌ [Playwright] 任务执行崩溃: {e}")
             app_state.busy_end("playwright_error")
             app_state.set_mode("idle")
-            ws_signals.search_finished.emit(task["batch_id"])
+            ws_signals.search_finished.emit(f"ERROR_{task['batch_id']}")
             ws_signals.scan_state_changed.emit("idle")
 
     threading.Thread(target=_run_playwright, daemon=True).start()

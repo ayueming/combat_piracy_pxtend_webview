@@ -18,6 +18,7 @@ PLATFORM_OTHER = "other"
 MODULE_SEARCH = "search"
 MODULE_NETDISK = "netdisk"
 MODULE_FORUM = "forum"
+MODULE_PANSITE = "pansite" # 盘站有内部搜索逻辑
 MODULE_OTHER = "other"
 # 以下都属于论坛，已合并到FLATFORM_FORUM，保留暂不报错
 MODULE_ZHIDAO = "zhidao"
@@ -41,10 +42,10 @@ PLATFORM_CONFIG = {
     ],
     "uc投诉": [
         ("uc网盘", PLATFORM_UC, MODULE_NETDISK, "UC网盘", []),
-        ("uc搜索", PLATFORM_UC, MODULE_SEARCH, "神马搜索", [])  # 统一为小写
+        ("uc搜索", PLATFORM_UC, MODULE_SEARCH, "神马搜索", [])  # 本软件内的英文，如无特殊情况，统一为小写，官方的以官方为准
     ],
     "迅雷投诉": [
-        ("迅雷网盘", PLATFORM_XUNLEI, MODULE_NETDISK, "迅雷云盘", [])
+        ("迅雷网盘", PLATFORM_XUNLEI, MODULE_NETDISK, "云盘服务", [])
     ],
     "其他": [
         # ★ 纯人工分类入口，不承接自动域名匹配。
@@ -53,7 +54,9 @@ PLATFORM_CONFIG = {
     "暂未开通": [
         # ★ module 填 MODULE_OTHER 仅为结构占位，业务判断请用 domain_matched + target_platform。
         #   以后往这里加微博/知乎/豆瓣等，module 统一填 MODULE_OTHER，不要新增 module 常量。
-        ("暂未开通", PLATFORM_OTHER, MODULE_OTHER, "暂未开通", [])
+        ("暂未开通", PLATFORM_OTHER, MODULE_OTHER, "暂未开通", []),
+        ("智能体", PLATFORM_OTHER, MODULE_PANSITE, "文心智能体", []),
+        ("爱网盘", PLATFORM_OTHER, MODULE_PANSITE, "爱网盘", [])
     ]
 }
 
@@ -68,9 +71,11 @@ PLATFORM_DOMAINS = {
     "夸克网盘": ["pan.quark.cn"],
     "uc网盘": ["drive.uc.cn"],
     "迅雷网盘": ["pan.xunlei.com"],
+    "智能体": ["smartapps.baidu.com"],
+    "爱网盘": ["iwangpan.cc"],
     # ★ 暂未开通：有明确域名但业务未开通，统一归入“暂未开通”分类。
     #   以后某个域名开通了业务，就从这里移出，在 PLATFORM_CONFIG 注册正式子分类并加入上方对应位置。
-    "暂未开通": ["aliyundrive.com", "lanzou", "123pan.com", "115.com"],
+    "暂未开通": ["aliyundrive.com", "lanzou", "123pan.com", "115.com"],    # 只是一个备注功能，也不会在别的业务上体现，要生效要先挪出去。
 }
 
 
@@ -141,7 +146,11 @@ if _invalid_domains:
 # 以后某个平台业务开通时，从本集合移除该字符串，按钮自动恢复显示。
 HIDDEN_MAIN_CATEGORIES = {"暂未开通"}
 
-
+HIDDEN_SUB_PLATFORMS = set()
+for main_cat in HIDDEN_MAIN_CATEGORIES:
+    if main_cat in PLATFORM_CONFIG:
+        for sub in PLATFORM_CONFIG[main_cat]:
+            HIDDEN_SUB_PLATFORMS.add(sub[0]) # sub[0] 就是 display_name
 
 # 仅提取已经正式开通的网盘域名（用于后期打标签）
 ACTIVE_NETDISK_DOMAINS = []

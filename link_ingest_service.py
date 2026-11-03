@@ -24,6 +24,8 @@ from app_data.copyright_whitelist_consts import (
 from app_data.crawl_consts import CRAWL_REDIRECT_TIMEOUT_MS
 from app_data.complaint_platform_consts import PLATFORM_DOMAINS, ACTIVE_NETDISK_DOMAINS
 
+from app_data.ext_search_strategies import get_ext_strategy
+
 from search_relevance_scorer import score as score_relevance
 from app_data.relevance_signal_consts import RELEVANCE_SIGNALS
 
@@ -59,12 +61,12 @@ def _clean_text_for_match(t):
     return re.sub(r'[\s\W]+', '', t or "")
 
 
-def _resolve_url(raw_url, resolver):
-    """短链解析。非短链原样返回；短链解析失败返回 None。"""
-    if "baidu.com/link?url=" not in raw_url:
+def _resolve_url(raw_url, resolver, is_mobile=0):
+    if not resolver._is_short_url(raw_url):
         return raw_url
     try:
-        parsed = resolver.resolve_single(raw_url)
+        # 把 is_mobile 传给工人
+        parsed = resolver.resolve_single(raw_url, is_mobile)
         if parsed and not resolver._is_short_url(parsed):
             return parsed
         return None
@@ -72,21 +74,33 @@ def _resolve_url(raw_url, resolver):
         return None
 
 
-def _is_blacklisted(cursor, url):
-    """查询 ignored_links 判断是否已被永删。"""
+def _is_blacklisted(cursor, url, stage="first"):
+    """查询 ignored_links，OR site_url 兜底历史数据"""
+    col = f"{stage}_url"
     return cursor.execute(
-        "SELECT id FROM ignored_links WHERE site_url = ?", (url,)
+        f"SELECT id FROM ignored_links WHERE {col} = ? OR site_url = ?",
+        (url, url)
     ).fetchone() is not None
 
 
-def _find_duplicate_in_sites(cursor, url, feature_code):
-    """在 sites 表查重（URL 或特征码任一命中）。返回已存在 id 或 None。"""
-    row = cursor.execute(
-        "SELECT id FROM sites WHERE site_url = ? "
-        "OR (feature_code IS NOT NULL AND feature_code != '' AND feature_code = ?) "
-        "LIMIT 1",
-        (url, feature_code or "")
-    ).fetchone()
+def _find_duplicate_by_stage(cursor, url, stage, feature_code):
+    col = f"{stage}_url"
+
+    # ★ 新增：如果是爱网盘链接，截取 /doc/ 后面的唯一 ID
+    like_url = ""
+    if "iwangpan.cc/doc/" in url:
+        doc_id = url.split("iwangpan.cc/doc/")[1].split("?")[0].split("#")[0].strip()
+        like_url = f"%{doc_id}%"
+
+    sql = f"SELECT id FROM sites WHERE {col} = ? OR site_url = ? OR (feature_code = ? AND feature_code != '')"
+    params = [url, url, feature_code or ""]
+
+    if like_url:
+        sql += f" OR {col} LIKE ?"
+        params.append(like_url)
+
+    sql += " LIMIT 1"
+    row = cursor.execute(sql, params).fetchone()
     return row[0] if row else None
 
 
@@ -151,6 +165,7 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     book_id = ctx.get("book_id")
     batch_id = (ctx.get("batch_id") or "").strip()
     pick_origin = (ctx.get("pick_origin") or "").strip()
+    is_mobile = 1 if ctx.get("is_mobile") else 0
 
     if not source_url and parent_url:
         source_url = parent_url
@@ -176,14 +191,14 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO draft_links (site_url, name, body_text, source_site, feature_code, "
+            "INSERT INTO draft_links (first_url, second_url, site_url, name, body_text, source_site, feature_code, "
             "source_platform, source_keyword, source_url, attr, book_id, book_name, category, "
-            "crawl_status, fetch_time, batch_id, parent_url, parent_title) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "crawl_status, fetch_time, batch_id, parent_url, parent_title, is_mobile) "
+            "VALUES (?, NULL, NULL, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # ★ 末尾多一个 ?
             (url, page_title, body_text, source_site_text, feature_code,
              source_platform, source_keyword, source_url, pick_origin,
              book_id, book_name or None, category, CRAWL_STATUS_PENDING, fetch_time,
-             batch_id, parent_url or None, parent_title or None)
+             batch_id, parent_url or None, parent_title or None, is_mobile)
         )
         conn.commit()
         db_id = str(cursor.lastrowid)
@@ -196,16 +211,13 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
         "attr": pick_origin, "feature_code": feature_code, "crawl_status": CRAWL_STATUS_PENDING,
         "complaint_time": "", "resource_status": "", "source_platform": source_platform,
         "source_keyword": source_keyword, "source_url": source_url, "fetch_time": fetch_time,
-        "batch_id": batch_id, "domain_matched": 0
+        "batch_id": batch_id, "domain_matched": 0, "is_mobile": is_mobile
     }
     return record, False, True
 
 
 def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, process_events_func=None,
                            only_manual=False):
-    """
-    流水线：解析 -> 去重 -> 查黑白名单 -> 查库 -> 关键词匹配 -> 分类评级
-    """
     ensure_schema()
     from link_resolver import LinkResolver
     from browser_manager import BrowserManager
@@ -213,10 +225,10 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
     conn = get_conn()
     cursor = conn.cursor()
 
-    _sel = ("SELECT id, site_url, source_platform, name, source_keyword, body_text, source_site, attr "
+    # ★ 核心修改：读 first_url
+    _sel = ("SELECT id, first_url, source_platform, name, source_keyword, body_text, source_site, attr, is_mobile "
             "FROM draft_links WHERE crawl_status = ?")
 
-    # 构造查询条件
     if batch_id == "LEGACY_BATCH":
         cond = " AND (batch_id IS NULL OR batch_id = '')"
         params = [CRAWL_STATUS_PENDING]
@@ -247,92 +259,149 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
     bm = BrowserManager.instance()
     resolver = LinkResolver(bm)
 
-    processed_urls = set()  # 当前批次批内去重记录
+    processed_first_urls = set()   # 阶段 1 批内去重
+    processed_second_urls = set()  # 阶段 2 批内去重
 
     try:
-        for (db_id, raw_url, source_platform, page_title, source_keyword,
-             body_text, source_site_text, attr) in records:
+        for (db_id, first_url_raw, source_platform, page_title, source_keyword,
+             body_text, source_site_text, attr, is_mobile) in records:
 
             is_manual = (attr == "手动获取")
+            strategy = get_ext_strategy(source_platform)
 
-            # --- 1. 解析 ---
-            real_url = _resolve_url(raw_url, resolver)
-            if real_url is None:
-                cursor.execute(
-                    "UPDATE draft_links SET crawl_status = ?, match_status = ? WHERE id = ?",
-                    (CRAWL_STATUS_PARSE_FAILED, "parse_failed", db_id)
-                )
+            # ================= 阶段 1 =================
+            first_url = _resolve_url(first_url_raw, resolver, is_mobile)
+            if first_url is None:
+                cursor.execute("UPDATE draft_links SET crawl_status = ?, match_status = ? WHERE id = ?",
+                               (CRAWL_STATUS_PARSE_FAILED, "parse_failed", db_id))
                 conn.commit()
                 failed_count += 1
                 continue
 
-            # --- 2. 批内去重 ---
-            if real_url in processed_urls:
+            if first_url in processed_first_urls:
                 cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
                 conn.commit()
                 continue
-            processed_urls.add(real_url)
+            processed_first_urls.add(first_url)
 
-            # --- 3. 白名单 ---
-            if _hit_whitelist(page_title, source_site_text, real_url):
-                cursor.execute(
-                    "UPDATE draft_links SET site_url = ?, crawl_status = ? WHERE id = ?",
-                    (real_url, CRAWL_STATUS_WHITELIST, db_id)
-                )
+            if _hit_whitelist(page_title, source_site_text, first_url):
+                cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                               (first_url, first_url, CRAWL_STATUS_WHITELIST, db_id))
                 conn.commit()
                 whitelist_skipped += 1
                 continue
 
-            # --- 4. 黑名单 ---
-            if _is_blacklisted(cursor, real_url):
-                cursor.execute(
-                    "UPDATE draft_links SET site_url = ?, crawl_status = ? WHERE id = ?",
-                    (real_url, CRAWL_STATUS_IGNORED, db_id)
-                )
+            if _is_blacklisted(cursor, first_url, "first"):
+                cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                               (first_url, first_url, CRAWL_STATUS_IGNORED, db_id))
                 conn.commit()
                 blacklist_skipped += 1
                 continue
 
-            # --- 5. 正式库查重 ---
-            new_feature = extract_pure_feature(real_url)
-            dup_id = _find_duplicate_in_sites(cursor, real_url, new_feature)
-            if dup_id:
+            feature_code_1 = extract_pure_feature(first_url)
+            dup_id_1 = _find_duplicate_by_stage(cursor, first_url, "first", feature_code_1)
+            if dup_id_1:
                 cursor.execute(
-                    "UPDATE draft_links SET site_url = ?, feature_code = ?, crawl_status = ?, "
+                    "UPDATE draft_links SET first_url = ?, site_url = ?, feature_code = ?, crawl_status = ?, "
                     "duplicate_of_id = ?, duplicate_of_table = 'sites' WHERE id = ?",
-                    (real_url, new_feature, CRAWL_STATUS_DUPLICATE, dup_id, db_id)
+                    (first_url, first_url, feature_code_1, CRAWL_STATUS_DUPLICATE, dup_id_1, db_id)
                 )
                 conn.commit()
                 duplicate_count += 1
                 continue
 
-            # --- 6. 关键词匹配（手动拾取跳过）---
+            # ================= 阶段 2 =================
+            final_url = first_url
+            second_url = None
+            final_feature_code = feature_code_1
+
+            if strategy.get("detailExtract") and strategy["detailExtract"].get("rules"):
+                second_url = resolver.resolve_detail(first_url, strategy, is_mobile)
+                if second_url is None:
+                    # 剥壳失败，直接标解析失败
+                    cursor.execute("UPDATE draft_links SET first_url = ?, site_url = NULL, crawl_status = ?, match_status = 'parse_failed' WHERE id = ?",
+                                   (first_url, CRAWL_STATUS_PARSE_FAILED, db_id))
+                    conn.commit()
+                    failed_count += 1
+                    continue
+
+                final_url = second_url
+                final_feature_code = extract_pure_feature(second_url)
+
+                if second_url in processed_second_urls:
+                    cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
+                    conn.commit()
+                    continue
+                processed_second_urls.add(second_url)
+
+                if _hit_whitelist(page_title, source_site_text, second_url):
+                    cursor.execute("UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                                   (first_url, second_url, second_url, CRAWL_STATUS_WHITELIST, db_id))
+                    conn.commit()
+                    whitelist_skipped += 1
+                    continue
+
+                if _is_blacklisted(cursor, second_url, "second"):
+                    cursor.execute("UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                                   (first_url, second_url, second_url, CRAWL_STATUS_IGNORED, db_id))
+                    conn.commit()
+                    blacklist_skipped += 1
+                    continue
+
+                dup_id_2 = _find_duplicate_by_stage(cursor, second_url, "second", final_feature_code)
+
+                if dup_id_2:
+                    # ★ 1. 识别真实网盘分类（只为了 UI 显示正确）
+                    real_platform, _ = _classify_platform(second_url, source_platform)
+
+                    # ★ 2. 极简修复老数据：如果老数据的核心字段是空的，就把新的补进去
+                    #    使用 COALESCE 和 NULLIF，意思是：如果老字段是 NULL 或空字符串，就用新值，否则保留老值。
+                    cursor.execute(
+                        "UPDATE sites SET "
+                        "first_url = COALESCE(NULLIF(first_url, ''), ?), "
+                        "second_url = COALESCE(NULLIF(second_url, ''), ?), "
+                        "site_url = COALESCE(NULLIF(site_url, ''), ?), "
+                        "feature_code = COALESCE(NULLIF(feature_code, ''), ?) "
+                        "WHERE id = ?",
+                        (first_url, second_url, second_url, final_feature_code, dup_id_2)
+                    )
+
+                    # ★ 3. 更新草稿状态为已在库，并修正分类，让 UI 不显示错乱
+                    cursor.execute(
+                        "UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, feature_code = ?, crawl_status = ?, "
+                        "category = ?, target_platform = ?, "
+                        "duplicate_of_id = ?, duplicate_of_table = 'sites' WHERE id = ?",
+                        (first_url, second_url, second_url, final_feature_code, CRAWL_STATUS_DUPLICATE,
+                         real_platform, real_platform,
+                         dup_id_2, db_id)
+                    )
+                    conn.commit()
+                    duplicate_count += 1
+                    continue
+
+            # ================= 终态处理 =================
             if not is_manual and _should_block_by_keyword(page_title, body_text, source_keyword):
                 cursor.execute(
-                    "UPDATE draft_links SET site_url = ?, feature_code = ?, crawl_status = ? WHERE id = ?",
-                    (real_url, new_feature, CRAWL_STATUS_UNMATCHED, db_id)
+                    "UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, feature_code = ?, crawl_status = ? WHERE id = ?",
+                    (first_url, second_url, final_url, final_feature_code, CRAWL_STATUS_UNMATCHED, db_id)
                 )
                 conn.commit()
                 unmatched_count += 1
                 continue
 
-            # --- 7. 平台分类 + 评级 + 最终写入 ---
-            target_platform, domain_matched = _classify_platform(real_url, source_platform)
+            target_platform, domain_matched = _classify_platform(final_url, source_platform)
             if domain_matched == 0:
-                relevance_val, relevance_hits_json = _calc_relevance(
-                    page_title, body_text, source_site_text, all_signals
-                )
+                relevance_val, relevance_hits_json = _calc_relevance(page_title, body_text, source_site_text, all_signals)
             else:
                 relevance_val, relevance_hits_json = 0.0, None
             has_pan = _detect_netdisk(page_title, body_text)
 
             cursor.execute(
-                "UPDATE draft_links SET site_url = ?, category = ?, target_platform = ?, "
+                "UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, category = ?, target_platform = ?, "
                 "match_status = 'matched', feature_code = ?, crawl_status = ?, "
                 "domain_matched = ?, relevance = ?, relevance_hits = ?, has_pan = ? WHERE id = ?",
-                (real_url, target_platform, target_platform, new_feature,
-                 CRAWL_STATUS_ORGANIZED, domain_matched, relevance_val,
-                 relevance_hits_json, has_pan, db_id)
+                (first_url, second_url, final_url, target_platform, target_platform, final_feature_code,
+                 CRAWL_STATUS_ORGANIZED, domain_matched, relevance_val, relevance_hits_json, has_pan, db_id)
             )
             conn.commit()
             success_count += 1
@@ -367,7 +436,7 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                     "SELECT site_url, name, body_text, source_site, feature_code, "
                     "  source_platform, source_keyword, source_url, attr, "
                     "  book_id, book_name, target_platform, fetch_time, batch_id, "
-                    "  parent_url, parent_title "
+                    "  parent_url, parent_title, is_mobile, first_url, second_url "  # ★ 增加
                     "FROM draft_links WHERE id = ?", (db_id,)
                 ).fetchone()
 
@@ -376,21 +445,20 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                 (url, name, body, source_site, code,
                  plat, kw, src_url, attr,
                  book_id, book_name, target_platform, fetch_time, batch_id,
-                 parent_url, parent_title) = row
+                 parent_url, parent_title, is_mobile, first_url, second_url) = row  # ★ 增加解包
 
                 try:
                     cursor.execute(
                         "INSERT INTO sites (category, target_platform, site_url, name, original_title, body_text, "
                         "  attr, feature_code, book_id, book_name, "
                         "  source_platform, source_keyword, source_url, fetch_time, "
-                        "  batch_id, domain_matched, parent_url, parent_title) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "  batch_id, domain_matched, parent_url, parent_title, is_mobile, first_url, second_url) "  # ★ 增加
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # ★ 改为 21 个问号
                         (category, target_platform or category, url,
-                         source_site or "未知来源",  # sites.name
-                         name,  # sites.original_title
-                         body, attr, code, book_id, book_name,
+                         source_site or "未知来源", name, body, attr, code, book_id, book_name,
                          plat, kw, src_url, fetch_time, batch_id,
-                         1 if target_platform else 0, parent_url, parent_title)
+                         1 if target_platform else 0, parent_url, parent_title, is_mobile,
+                         first_url, second_url)  # ★ 增加变量
                     )
                     inserted_count += 1
                 except sqlite3.IntegrityError:
@@ -399,11 +467,15 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
 
         if blacklist_ids:
             placeholders = ','.join('?' * len(blacklist_ids))
-            rows = cursor.execute(f"SELECT id, site_url, name FROM draft_links WHERE id IN ({placeholders})",
-                                  blacklist_ids).fetchall()
+            # ★ 增加 first_url, second_url
+            rows = cursor.execute(
+                f"SELECT id, site_url, name, first_url, second_url FROM draft_links WHERE id IN ({placeholders})",
+                blacklist_ids).fetchall()
             for r in rows:
-                cursor.execute("INSERT OR IGNORE INTO ignored_links (site_url, title, add_time) VALUES (?, ?, ?)",
-                               (r[1], r[2], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                # ★ 增加写入
+                cursor.execute(
+                    "INSERT OR IGNORE INTO ignored_links (site_url, title, add_time, first_url, second_url) VALUES (?, ?, ?, ?, ?)",
+                    (r[1], r[2], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r[3], r[4]))
                 cursor.execute("DELETE FROM draft_links WHERE id = ?", (r[0],))
                 black_count += 1
 
