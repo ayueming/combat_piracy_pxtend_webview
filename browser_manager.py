@@ -24,7 +24,18 @@ class BrowserManager:
                     if not user_id:
                         raise Exception("未登录")
                     profile_dir = os.path.join(get_user_dir(user_id), DIR_BROWSER_PROFILE)
+
+                    old = cls._instance
+                    old_alive = old._bt.is_alive() if old else None
+                    old_bt_tid = old._bt._tid if old else None
+
                     cls._instance = cls(profile_dir)
+
+                    print(f"[BM.instance] ⚠️ 发生实例替换！"
+                          f"thread={threading.get_ident()} "
+                          f"old={id(old)} old_bt_tid={old_bt_tid} old_alive={old_alive} "
+                          f"new={id(cls._instance)} new_bt_tid={cls._instance._bt._tid}")
+
                     atexit.register(cls._instance.shutdown)
         return cls._instance
 
@@ -38,13 +49,17 @@ class BrowserManager:
         self._browser = None
         self._context = None
 
+        self._pw_thread_id = None
+        self._browser_thread_id = None
+        self._context_thread_id = None
+
         self._shutdown_lock = threading.Lock()
         self.is_shutting_down = False
         self._picker_injected = False
 
     def reset_playwright(self):
-        """强制重置底层的 Playwright 连接"""
-        print("⚠️ [BrowserManager] 检测到连接异常，正在重置底层状态...")
+        print(f"[BM.reset_playwright] ⚠️ 被调用 thread={threading.get_ident()} "
+              f"bt_tid={self._bt._tid} 一致={threading.get_ident() == self._bt._tid}")
         try:
             if self._browser:
                 self._browser.close()
@@ -58,7 +73,30 @@ class BrowserManager:
         self._pw = None
         self._browser = None
         self._context = None
+        self._pw_thread_id = None  # 新增
+        self._browser_thread_id = None  # 新增
+        self._context_thread_id = None  # 新增
         self._picker_injected = False
+
+    def shutdown(self, force=False):
+        with self._shutdown_lock:
+            if self.is_shutting_down:
+                return
+            self.is_shutting_down = True
+
+        print(f"[BM.shutdown] 被调用 thread={threading.get_ident()} "
+              f"bt_tid={self._bt._tid} 一致={threading.get_ident() == self._bt._tid}")
+        try:
+            if self._bt.is_alive():
+                self._bt.submit(self._shutdown_impl, block=True, timeout=20)
+        except Exception as e:
+            print(f"[BrowserManager] shutdown 投递失败: {e}")
+        finally:
+            try:
+                self._bt.stop()
+            except Exception:
+                pass
+            self.is_shutting_down = False
 
     def run_in_browser_thread(self, fn, *args, block=True, timeout=None, **kwargs):
         return self._bt.submit(fn, *args, block=block, timeout=timeout, **kwargs)
@@ -72,28 +110,17 @@ class BrowserManager:
     def new_page(self, url=None, force_new=False):
         return self._bt.submit(self._new_page_impl, url, force_new)
 
-    def shutdown(self, force=False):
-        with self._shutdown_lock:
-            if self.is_shutting_down:
-                return
-            self.is_shutting_down = True
-
-        try:
-            if self._bt.is_alive():
-                # 只断开 Playwright 的连接，不杀浏览器进程（留给 plugin_bridge 管）
-                self._bt.submit(self._shutdown_impl, block=True, timeout=20)
-        except Exception as e:
-            print(f"[BrowserManager] shutdown 投递失败: {e}")
-        finally:
-            try:
-                self._bt.stop()
-            except Exception:
-                pass
-            self.is_shutting_down = False
-
     # ================= 核心接管逻辑 =================
 
+
     def _ensure_started_impl(self, minimized=False):
+        # ↓↓↓ 入口：身份快照 ↓↓↓
+        print(f"[BM._ensure] enter thread={threading.get_ident()} bt_tid={self._bt._tid} "
+              f"pw={id(self._pw) if self._pw else None} pw_tid={self._pw_thread_id} "
+              f"browser={id(self._browser) if self._browser else None} browser_tid={self._browser_thread_id} "
+              f"ctx={id(self._context) if self._context else None} ctx_tid={self._context_thread_id}")
+        # ↑↑↑
+
         if self._browser:
             try:
                 if not self._browser.is_connected():
@@ -101,12 +128,23 @@ class BrowserManager:
                     self._browser = None
                     self._context = None
                     self._picker_injected = False
+                    # ↓↓↓ 新增 ↓↓↓
+                    self._browser_thread_id = None
+                    self._context_thread_id = None
+                    # ↑↑↑
             except Exception:
                 self._browser = None
                 self._context = None
                 self._picker_injected = False
+                self._browser_thread_id = None
+                self._context_thread_id = None
 
         if self._browser and self._browser.is_connected():
+            # ↓↓↓ 新增：这里是最容易跨线程返回的漏洞点 ↓↓↓
+            print(f"[BM._ensure] 快速返回(已连接) thread={threading.get_ident()} "
+                  f"browser_tid={self._browser_thread_id} ctx_tid={self._context_thread_id} "
+                  f"⚠️线程一致={threading.get_ident() == self._context_thread_id}")
+            # ↑↑↑
             return
 
         try:
@@ -119,16 +157,24 @@ class BrowserManager:
         print("🔗 [BrowserManager] 正在通过 CDP 接管浏览器...")
         if not self._pw:
             self._pw = sync_playwright().start()
+            # ↓↓↓ 新增：记录 _pw 出生线程 ↓↓↓
+            self._pw_thread_id = threading.get_ident()
+            print(f"[BM._ensure] 新建 _pw id={id(self._pw)} tid={self._pw_thread_id}")
+            # ↑↑↑
 
         try:
             self._browser = self._pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            self._browser_thread_id = threading.get_ident()  # 新增
             self._context = self._browser.contexts[0]
+            self._context_thread_id = threading.get_ident()  # 新增
 
             if not self._picker_injected:
                 self._context.add_init_script(self._get_stealth_js())
                 self._picker_injected = True
 
-            print("✅ [BrowserManager] 成功接管插件浏览器！")
+            print(f"✅ [BrowserManager] 成功接管插件浏览器！"
+                  f"browser_tid={self._browser_thread_id} ctx_tid={self._context_thread_id} "
+                  f"thread={threading.get_ident()}")
         except Exception as e:
             print(f"❌ [BrowserManager] CDP 接管失败，尝试强制重启浏览器... ({e})")
             from plugin_bridge import restart_extension_browser
@@ -136,7 +182,9 @@ class BrowserManager:
 
             try:
                 self._browser = self._pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                self._browser_thread_id = threading.get_ident()  # 新增
                 self._context = self._browser.contexts[0]
+                self._context_thread_id = threading.get_ident()  # 新增
                 if not self._picker_injected:
                     self._context.add_init_script(self._get_stealth_js())
                     self._picker_injected = True
@@ -145,13 +193,18 @@ class BrowserManager:
                 print(f"❌ [BrowserManager] 重启后仍然接管失败: {retry_e}")
                 self._pw.stop()
                 self._pw = None
+                self._pw_thread_id = None  # 新增
                 raise
 
     def _safe_new_page(self):
+        print(f"[BM._safe_new_page] enter thread={threading.get_ident()} "
+              f"bt_tid={self._bt._tid} ctx_tid={self._context_thread_id} "
+              f"⚠️线程一致={threading.get_ident() == self._context_thread_id}")
         try:
             return self._context.new_page()
         except Exception as e:
             err_msg = str(e)
+            print(f"[BM._safe_new_page] 异常: {err_msg}")
             if ("Target.createTarget" in err_msg
                     or "Target closed" in err_msg
                     or "Connection closed" in err_msg):
@@ -164,10 +217,14 @@ class BrowserManager:
                 self._browser = None
                 self._context = None
                 self._pw = None
+                self._pw_thread_id = None  # 新增
+                self._browser_thread_id = None  # 新增
+                self._context_thread_id = None  # 新增
                 self._picker_injected = False
                 self._ensure_started_impl(minimized=False)
                 return self._context.new_page()
             raise
+
 
     def _new_page_impl(self, url=None, force_new=False):
         self._ensure_started_impl(minimized=False)

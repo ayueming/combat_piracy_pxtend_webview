@@ -99,12 +99,11 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
 
             from browser_manager import BrowserManager
             from search_crawler import SearchCrawler
-            from browser_thread import browser_thread
 
             bm = BrowserManager.instance()
             crawler = SearchCrawler(bm)
 
-            links = browser_thread.submit(crawler.run_task, task)
+            links = bm.run_in_browser_thread(crawler.run_task, task)
 
             if links:
                 new_count = 0

@@ -1,6 +1,7 @@
 # complaint_base.py
 import os
 import time
+import threading
 import traceback
 from PySide6.QtCore import QObject, Signal
 
@@ -61,11 +62,15 @@ class BaseComplaintRunner:
             raise RuntimeError("生成临时 Excel 失败")
 
     def init_browser(self):
-        """唤醒浏览器并获取工作页面"""
         self.log("正在唤醒统一浏览器...")
         try:
             bm = BrowserManager.instance()
+            print(f"[Base.init_browser] thread={threading.get_ident()} "
+                  f"bm={id(bm)} bt_tid={bm._bt._tid} "
+                  f"pw_tid={bm._pw_thread_id} ctx_tid={bm._context_thread_id}")  # 新增
             self.page = bm.new_page()
+            print(f"[Base.init_browser] 拿到 page id={id(self.page)} "
+                  f"thread={threading.get_ident()}")  # 新增
         except Exception as e:
             raise RuntimeError(f"浏览器启动失败: {e}")
 
@@ -84,36 +89,31 @@ class BaseComplaintRunner:
         raise NotImplementedError("子类必须实现 check_platform_login")
 
     def wait_for_login(self, timeout_sec=300, reload_on_event=True):
-        """
-        通用的登录等待骨架：循环调用子类的 check_platform_login
-        """
         self.log("⏳ 正在检查账号登录状态...")
         waited = 0
         while True:
             if self.stop_event and self.stop_event.is_set():
                 return False
 
-            # 调用子类判断
             if self.check_platform_login():
                 self.log("✅ 账号已登录！脚本自动接管。")
                 if self.dialog_signal:
                     self.dialog_signal.reset_progress()
                 return True
 
-            # 首次提示
-            if waited == 0:
+            # ★ 核心修改：加入 5 秒静默宽限期
+            if waited == 5:
                 self.log("⚠️ 检测到未登录/掉线，脚本已挂起...")
                 if self.dialog_signal:
                     self.dialog_signal.show_login_required()
 
-            # 等待事件或超时
             if self.login_event:
-                self.login_event.wait(timeout=5)
+                self.login_event.wait(timeout=1)  # ★ 改为1秒步长，快速轮询
                 self.login_event.clear()
             else:
-                time.sleep(5)
+                time.sleep(1)
 
-            waited += 5
+            waited += 1
             if waited % 10 == 0:
                 self.log(f"⏳ 等待登录中...（已等待 {waited} 秒）")
 
@@ -121,7 +121,6 @@ class BaseComplaintRunner:
                 self.log(f"❌ 等待登录超时（{timeout_sec}秒）")
                 return False
 
-            # 如果用户点击了“我已登录”按钮，可能需要刷新页面
             if reload_on_event and self.page and not self.page.is_closed():
                 try:
                     self.page.wait_for_load_state("networkidle", timeout=3000)

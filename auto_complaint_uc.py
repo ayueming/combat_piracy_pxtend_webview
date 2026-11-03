@@ -14,14 +14,19 @@ class UcComplaintRunner(BaseComplaintRunner):
         self.platform_logo = "UC"
 
     def check_platform_login(self) -> bool:
-        """UC专属登录检测：通过 DOM 元素判断"""
+        """UC专属登录检测：通过 DOM 元素和数字 ID 判断"""
         try:
+            # 1. 如果有未登录的弹窗或iframe，说明掉线
             if self.page.locator("div.box, iframe#quarkIframe").count() > 0:
                 return False
 
+            # 2. 尝试找用户头像或标识
             user_span = self.page.locator("span.user.ant-dropdown-trigger").first
-            if user_span.count() > 0 and "UC用户" in user_span.inner_text():
-                return True
+            if user_span.count() > 0:
+                text = user_span.inner_text().strip()
+                # ★ 核心修改：只有文字中包含了数字（如“UC用户 100620717407”），才认为是真登录
+                if "UC用户" in text and re.search(r'\d+', text):
+                    return True
         except Exception:
             pass
         return False
@@ -30,6 +35,28 @@ class UcComplaintRunner(BaseComplaintRunner):
         """UC 核心业务逻辑"""
         self.log("正在打开 UC 投诉主页...")
         self.page.goto("https://ipp.uc.cn/#/home", wait_until="domcontentloaded", timeout=30000)
+
+        # ★ 新增：防抖探针（给前端 5 秒时间渲染 Ajax 数据）
+        self.log("⏳ 探针就位，正在等待网页渲染并获取登录状态...")
+        try:
+            self.page.wait_for_function(
+                """() => {
+                    if (document.querySelector('div.box') || document.querySelector('iframe#quarkIframe')) {
+                        return true;
+                    }
+                    const userSpan = document.querySelector('span.user.ant-dropdown-trigger');
+                    if (userSpan) {
+                        const text = userSpan.innerText || '';
+                        if (/\\d+/.test(text)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                timeout=5000
+            )
+        except Exception:
+            self.log("⚠️ 探针等待超时，交由后续流程处理。")
 
         # 1. 等待登录
         if not self.wait_for_login(timeout_sec=300):

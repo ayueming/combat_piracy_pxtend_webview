@@ -49,11 +49,19 @@ class BrowserThread:
     def submit(self, fn, *args, block=True, timeout=None, **kwargs):
         if not self._started:
             raise RuntimeError("BrowserThread 尚未启动")
-        # 重入：就在浏览器线程里，直接执行
-        if threading.get_ident() == self._tid:
+
+        cur = threading.get_ident()
+        if cur == self._tid:
+            # 重入：就在浏览器线程里，直接执行
             return fn(*args, **kwargs)
+
         if self._stopped:
             raise RuntimeError("BrowserThread 已退出")
+
+        # ↓↓↓ 新增：只在真正跨线程投递时打，避免噪音 ↓↓↓
+        print(f"[BT.submit] 投递 fn={getattr(fn, '__name__', fn)} "
+              f"from_thread={cur} to_bt_tid={self._tid}")
+        # ↑↑↑
 
         box = {"event": threading.Event()}
         self._q.put((fn, args, kwargs, box))

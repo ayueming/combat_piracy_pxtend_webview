@@ -3,7 +3,7 @@ import os
 import time
 import random
 import urllib.request
-from browser_thread import browser_thread  # ★ 排队线程
+
 from rate_limiter import global_limiter  # ★ 引入全局节拍器
 
 
@@ -88,7 +88,7 @@ class LinkResolver:
                     return url
 
             try:
-                real_url = browser_thread.submit(_do_browser_resolve)
+                real_url = self.bm.run_in_browser_thread(_do_browser_resolve)
                 if real_url and not self._is_short_url(real_url):
                     return real_url
             except Exception as e:
@@ -173,7 +173,7 @@ class LinkResolver:
                 return None
 
         try:
-            real_url = browser_thread.submit(_do_browser_resolve)
+            real_url = self.bm.run_in_browser_thread(_do_browser_resolve)
             return real_url
         except Exception as e:
             print(f"⚠️ [二阶段] 浏览器排队解析失败: {e}")

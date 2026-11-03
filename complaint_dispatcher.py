@@ -1,5 +1,7 @@
 # complaint_dispatcher.py
 import time
+import threading
+
 from PySide6.QtCore import QObject, Signal
 
 # ★ 引入各平台脚本
@@ -66,6 +68,9 @@ class ComplaintDispatcher(QObject):
             return False
 
         bm = BrowserManager.instance()
+        print(f"[Dispatcher] thread={threading.get_ident()} "
+              f"bm={id(bm)} bt_tid={bm._bt._tid} "
+              f"pw_tid={bm._pw_thread_id} ctx_tid={bm._context_thread_id}")  # 新增
         # 整段投递：run_func 内部所有 page 操作都在 BrowserThread 里执行
         # 内部 bm.new_page() 等调用会因 submit 的重入判断直接原地执行，不会死锁
         return bm.run_in_browser_thread(
