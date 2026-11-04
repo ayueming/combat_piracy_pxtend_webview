@@ -190,6 +190,11 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     conn = get_conn()
     cursor = conn.cursor()
     try:
+        if parent_url:
+            p_code = extract_pure_feature(parent_url)
+            if p_code:
+                cursor.execute("UPDATE sites SET picker_status = '已拾取' WHERE feature_code = ?", (p_code,))
+
         cursor.execute(
             "INSERT INTO draft_links (first_url, second_url, site_url, name, body_text, source_site, feature_code, "
             "source_platform, source_keyword, source_url, attr, book_id, book_name, category, "
@@ -233,11 +238,12 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
         cond = " AND (batch_id IS NULL OR batch_id = '')"
         params = [CRAWL_STATUS_PENDING]
         if only_manual: cond += " AND attr = '手动获取'"
-    elif batch_id:
+    elif batch_id and batch_id != "ALL":  # ★ 核心修改：遇到 "ALL" 强制走 else 全局查询
         cond = " AND batch_id = ?"
         params = [CRAWL_STATUS_PENDING, batch_id]
         if only_manual: cond += " AND attr = '手动获取'"
     else:
+        # 此时无论 batch_id 是 None 还是 "ALL"，都会查全库
         cond = ""
         params = [CRAWL_STATUS_PENDING]
         if only_manual: cond += " AND attr = '手动获取'"
@@ -315,8 +321,7 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
             second_url = None
             final_feature_code = feature_code_1
 
-            if strategy.get("detailExtract") and strategy["detailExtract"].get("rules"):
-                second_url = resolver.resolve_detail(first_url, strategy, is_mobile)
+            if not is_manual and strategy.get("detailExtract") and strategy["detailExtract"].get("rules"):
                 if second_url is None:
                     # 剥壳失败，直接标解析失败
                     cursor.execute("UPDATE draft_links SET first_url = ?, site_url = NULL, crawl_status = ?, match_status = 'parse_failed' WHERE id = ?",
@@ -452,13 +457,13 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                         "INSERT INTO sites (category, target_platform, site_url, name, original_title, body_text, "
                         "  attr, feature_code, book_id, book_name, "
                         "  source_platform, source_keyword, source_url, fetch_time, "
-                        "  batch_id, domain_matched, parent_url, parent_title, is_mobile, first_url, second_url) "  # ★ 增加
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # ★ 改为 21 个问号
+                        "  batch_id, domain_matched, parent_url, parent_title, is_mobile, first_url, second_url) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # ★ 改回 21 个问号
                         (category, target_platform or category, url,
                          source_site or "未知来源", name, body, attr, code, book_id, book_name,
                          plat, kw, src_url, fetch_time, batch_id,
                          1 if target_platform else 0, parent_url, parent_title, is_mobile,
-                         first_url, second_url)  # ★ 增加变量
+                         first_url, second_url)
                     )
                     inserted_count += 1
                 except sqlite3.IntegrityError:

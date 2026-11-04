@@ -1,5 +1,6 @@
 # ui_components.py
 import re
+import json
 from PySide6.QtWidgets import (QHeaderView, QStyleOptionButton, QApplication,
                                QStyle, QStyledItemDelegate, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel,
@@ -8,16 +9,21 @@ from PySide6.QtWidgets import (QHeaderView, QStyleOptionButton, QApplication,
 from PySide6.QtCore import (Qt, QSortFilterProxyModel, QPoint, QRect, QEvent,
                             QItemSelection, QItemSelectionModel, QModelIndex, Signal,
                             QTimer)
-from PySide6.QtGui import QColor, QPainter, QPolygon, QPen, QPainterPath
+from PySide6.QtGui import QColor, QPainter, QPolygon, QPen, QPainterPath, QStandardItem
 
 # ★ 从 ui_styles 引入统一颜色，避免重复定义和色彩漂移
 from ui_styles import (
     TOGGLE_GREEN,
     BG_HOVER,
+    BG_WHITE,
     TEXT_DARK,
     DANGER_RED,
-    ERROR_BG,
-    ERROR_BG_SELECTED
+    ROW_SELECTED_BG,
+    CELL_REQUIRED_BG,
+    CELL_INVALID_FG,
+    CELL_ERROR_SELECTED_BG,
+    HEADER_BG_COLOR,
+    BORDER_LIGHT,             # ★ 新增
 )
 
 # ================= 统一默认样式常量（可被子页面传参覆盖） =================
@@ -27,12 +33,10 @@ CHECK_BORDER_COLOR = "#DCDCDC"
 CHECK_BOX_SIZE = 16
 CHECK_BOX_RADIUS = 4
 
-HEADER_BG_COLOR = BG_HOVER
 HEADER_FILTERED_BG_COLOR = "#FFF3E0"
 HEADER_TRIANGLE_COLOR = "#666666"
 HEADER_TRIANGLE_ACTIVE_COLOR = DANGER_RED
 
-ROW_SELECTED_BG = BG_HOVER
 ROW_HOVER_BG = BG_HOVER
 
 
@@ -98,11 +102,26 @@ def is_alnum_only(text: str) -> bool:
     return (not text) or bool(_ALNUM_PATTERN.fullmatch(text))
 
 
+def apply_required_style(item, is_missing):
+    """为单元格设置/清除"必填缺失"底色。
+
+    item: QStandardItem 或 QTableWidgetItem
+    is_missing: True 时标红，False 时清除。
+
+    各表只负责判定 is_missing（含"全新空行不标红"的业务判据），
+    视觉规则在此统一。
+    """
+    if is_missing:
+        item.setBackground(QColor(CELL_REQUIRED_BG))
+    else:
+        item.setBackground(QColor(0, 0, 0, 0))
+
+
 # ================= 通用正则校验委托 =================
 class PatternCellDelegate(QStyledItemDelegate):
-    INVALID_BG = QColor(ERROR_BG)
-    INVALID_BG_SELECTED = QColor(ERROR_BG_SELECTED)
-    INVALID_FG = QColor(DANGER_RED)
+    INVALID_BG = QColor(CELL_REQUIRED_BG)
+    INVALID_BG_SELECTED = QColor(CELL_ERROR_SELECTED_BG)
+    INVALID_FG = QColor(CELL_INVALID_FG)
     BORDER_COLOR = QColor("#E9ECEF")
     SELECT_BORDER = QColor(TOGGLE_GREEN)
 
@@ -118,8 +137,10 @@ class PatternCellDelegate(QStyledItemDelegate):
         text = index.data(Qt.DisplayRole) or ""
 
         if self.is_valid(text):
+            # ★ 合法时，调用系统默认绘制（绝不会有倒三角，且会跟随表格 QSS 的选中绿底）
             super().paint(painter, option, index)
         else:
+            # ★ 非法时，自己接管：画红底、红字、选中加绿框
             painter.save()
 
             if option.state & QStyle.State_Selected:
@@ -351,6 +372,71 @@ class ExcelFilterProxyModel(QSortFilterProxyModel):
         return True
 
 
+class ColumnWidthPersister:
+    """监听表头 sectionResized，debounce 后保存列宽到 QSettings。
+       attach() 时会先尝试还原。
+
+       用法：
+           persister = ColumnWidthPersister(view, settings, "links_col_widths",
+                                            exclude_cols=(COL_URL,))
+           persister.attach()
+    """
+
+    def __init__(self, view, settings, key, exclude_cols=(), debounce_ms=400):
+        self.view = view
+        self.settings = settings
+        self.key = key
+        self.exclude_cols = set(exclude_cols)
+        self._attached = False
+        self._timer = QTimer(view)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(debounce_ms)
+        self._timer.timeout.connect(self._save)
+
+    def attach(self):
+        if self._attached:
+            return
+        self._load()
+        self.view.horizontalHeader().sectionResized.connect(self._on_resized)
+        self._attached = True
+
+    def _on_resized(self, col, old, new):
+        if col in self.exclude_cols:
+            return
+        self._timer.start()
+
+    def _save(self):
+        header = self.view.horizontalHeader()
+        model = self.view.model()
+        if model is None:
+            return
+        widths = {}
+        for col in range(model.columnCount()):
+            if col in self.exclude_cols:
+                continue
+            widths[str(col)] = header.sectionSize(col)
+        self.settings.setValue(self.key, json.dumps(widths))
+
+    def _load(self):
+        raw = self.settings.value(self.key, "")
+        if not raw:
+            return
+        try:
+            widths = json.loads(raw)
+        except Exception:
+            return
+        header = self.view.horizontalHeader()
+        header.blockSignals(True)
+        try:
+            for col_str, width in widths.items():
+                col = int(col_str)
+                if col in self.exclude_cols:
+                    continue
+                header.resizeSection(col, width)
+        finally:
+            header.blockSignals(False)
+
+
 class CheckListDelegate(QStyledItemDelegate):
     def __init__(self, parent_widget, list_widget, **style_kwargs):
         super().__init__(list_widget)
@@ -361,7 +447,10 @@ class CheckListDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
+
+        # ★ 关键修复：补上这行丢失的 rect 定义
         rect = option.rect
+
         if option.state & QStyle.State_MouseOver:
             painter.fillRect(rect, QColor(BG_HOVER))
 
@@ -378,7 +467,7 @@ class CheckListDelegate(QStyledItemDelegate):
         font.setPointSize(10)
         painter.setFont(font)
 
-        # ★ 增加省略号截断，防止长文本撑破横向滚动条
+        # 增加省略号截断，防止长文本撑破横向滚动条
         elided_text = painter.fontMetrics().elidedText(text, Qt.ElideRight, text_rect.width())
         painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, elided_text)
 
@@ -399,26 +488,24 @@ class CheckListDelegate(QStyledItemDelegate):
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
+        # 捕获鼠标左键释放事件
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             rect = option.rect
-            btn_text = "仅筛选此项"
+
+            # 重新计算按钮区域（必须与 paint 方法中的逻辑保持一致）
             btn_width = 80
             btn_height = 24
             btn_rect = QRect(rect.right() - btn_width - 10,
                              rect.top() + (rect.height() - btn_height) // 2,
                              btn_width, btn_height)
+
+            # 判断鼠标点击位置是否在按钮内
             if btn_rect.contains(event.pos()):
-                if hasattr(self.parent_widget, 'filter_only_this_row'):
+                if self.parent_widget and hasattr(self.parent_widget, 'filter_only_this_row'):
+                    # 调用高级筛选弹窗的“仅筛选此项”逻辑
                     self.parent_widget.filter_only_this_row(index.row())
-                return True
-            item = self.list_widget.item(index.row())
-            if item:
-                new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-                item.setCheckState(new_state)
-                if hasattr(self.parent_widget, 'update_select_all_btn_state'):
-                    self.parent_widget.update_select_all_btn_state()
-                self.list_widget.viewport().update()
-            return True
+                return True  # 吃掉事件，防止传递给列表本身
+
         return super().editorEvent(event, model, option, index)
 
 
@@ -693,12 +780,18 @@ class FilterHeaderView(QHeaderView):
     def paintSection(self, painter, rect, logical_index):
         if logical_index == -1:
             painter.fillRect(rect, QColor(self.header_bg))
+            # ★ 补底边和右边线
+            painter.setPen(QColor(BORDER_LIGHT))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            painter.drawLine(rect.topRight(), rect.bottomRight())
             return
 
         model = self.parent().model()
 
         if logical_index == 0 and self.show_checkbox:
             painter.fillRect(rect, QColor(self.header_bg))
+
+            # ★ 完整恢复的全选计算逻辑（必须用 model 获取，QTableView 没有 item 方法）
             all_checked = True
             has_data = False
             for row in range(model.rowCount()):
@@ -711,7 +804,13 @@ class FilterHeaderView(QHeaderView):
                     break
             if not has_data:
                 all_checked = False
+
             draw_checkbox(painter, rect, all_checked, **self.check_style_kwargs)
+
+            # ★ 补底边和右边线
+            painter.setPen(QColor(BORDER_LIGHT))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            painter.drawLine(rect.topRight(), rect.bottomRight())
             return
 
         is_filtered = hasattr(model, 'filter_dict') and logical_index in model.filter_dict
@@ -981,3 +1080,85 @@ class HintButton(QPushButton):
             self._popup = None
         self._popup = HintPopup(self._text, self)
         self._popup.show()
+
+
+# ================= 勾选交互公共组件 =================
+
+def handle_check_column_click(view, event, chk_col=0, is_proxy=False):
+    """处理点击第 0 列（勾选列）的鼠标事件，统一 Ctrl/Shift 多选逻辑。"""
+    index = view.indexAt(event.pos())
+    if index.isValid() and index.column() == chk_col:
+        sel_model = view.selectionModel()
+        is_selected = sel_model.isRowSelected(index.row(), index.parent())
+        mods = event.modifiers()
+
+        view.setCurrentIndex(index)
+
+        if mods & (Qt.ControlModifier | Qt.ShiftModifier):
+            if is_selected:
+                sel_model.select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
+            else:
+                sel_model.select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        else:
+            if is_selected:
+                sel_model.select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
+            else:
+                sel_model.select(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        return True
+    return False
+
+
+class SelectionCheckSync:
+    """统一处理：表格选中行 ↔ CheckBox 勾选状态的同步。"""
+
+    def __init__(self, view, proxy_model=None, update_header=True):
+        self.view = view
+        self.proxy_model = proxy_model
+        self.update_header = update_header
+        self.view.selectionModel().selectionChanged.connect(self._on_selection_changed)
+
+    def _on_selection_changed(self, selected, deselected):
+        selected_rows = set(idx.row() for idx in selected.indexes())
+        deselected_rows = set(idx.row() for idx in deselected.indexes())
+        deselected_rows -= selected_rows
+
+        if not selected_rows and not deselected_rows:
+            return
+
+        self.view.blockSignals(True)
+        try:
+            for r in deselected_rows:
+                item = self._get_chk_item(r)
+                if item and item.checkState() != Qt.Unchecked:
+                    item.setCheckState(Qt.Unchecked)
+
+            for r in selected_rows:
+                item = self._get_chk_item(r)
+                if item and item.checkState() != Qt.Checked:
+                    item.setCheckState(Qt.Checked)
+        finally:
+            self.view.blockSignals(False)
+
+        self.view.viewport().update()
+        if self.update_header and hasattr(self.view, 'horizontalHeader'):
+            self.view.horizontalHeader().viewport().update()
+
+    def _get_chk_item(self, row):
+        if self.proxy_model:
+            src_idx = self.proxy_model.mapToSource(self.proxy_model.index(row, 0))
+            item = self.proxy_model.sourceModel().item(src_idx.row(), 0)
+        else:
+            item = self.view.item(row, 0) if hasattr(self.view, 'item') else self.view.model().item(row, 0)
+
+        if not item:
+            return None
+
+        # 过滤掉没有实际数据的空行
+        if hasattr(item, 'data'):
+            if isinstance(item, QStandardItem):
+                if item.data(Qt.UserRole) is None:
+                    return None
+            else:
+                if not (item.flags() & Qt.ItemIsUserCheckable) or not item.data(Qt.UserRole):
+                    return None
+        return item

@@ -2,7 +2,8 @@ import sqlite3
 import os
 
 from data_importer_books import import_books_from_file
-from evidence_store import safe_delete_file, save_uploaded_image
+# ★ 修改1：导入 upsert_evidence 和 delete_evidence_record
+from evidence_store import safe_delete_file, save_uploaded_image, upsert_evidence, delete_evidence_record
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
                                QAbstractItemView, QFileDialog, QSizePolicy, QDialog, QGroupBox,
@@ -18,6 +19,9 @@ from ui_components import (
     PatternCellDelegate,
     is_alnum_only,
     HintButton,
+    ColumnWidthPersister,
+    apply_required_style,
+    SelectionCheckSync,  # ★ 新增
 )
 
 # ★ 按钮/表格样式统一从 ui_styles 引入
@@ -28,6 +32,8 @@ from ui_styles import (
     BTN_DANGER_OUTLINE,
     BTN_SECONDARY_DARK,
     TABLE_BASE,
+    TABLE_HEADER_BASE,  # ★ 新增
+    HEADER_BG_COLOR,  # ★ 新增
     btn_link_style,
     PRIMARY_GREEN,
     PRIMARY_GREEN_HOVER,
@@ -128,15 +134,8 @@ class BookEvidenceCell(QWidget):
             prefix_id = platform_id if platform_id else f"book_{db_id}"
             new_file_path = save_uploaded_image(path, "作品维权书", prefix_id)
 
-            # 先更新 DB，再删旧文件（safe_delete_file 会查 books.evidence_path，
-            # 顺序反过来会把"新指向"误判为无引用）
-            conn = get_conn()
-            conn.execute("UPDATE books SET evidence_path=? WHERE id=?", (new_file_path, db_id))
-            conn.commit()
-            conn.close()
-
-            if self.file_path and os.path.abspath(self.file_path) != os.path.abspath(new_file_path):
-                safe_delete_file(self.file_path)
+            # ★ 修改2：统一写入 evidences 表（upsert_evidence 内部会自动处理旧文件的物理删除）
+            upsert_evidence('book', str(db_id), 'auth_pdf', new_file_path)
 
             self.parent_page.refresh_table()
         except Exception as e:
@@ -164,13 +163,10 @@ class BookEvidenceCell(QWidget):
 
         old_path = self.file_path
 
-        conn = get_conn()
-        conn.execute("UPDATE books SET evidence_path=NULL WHERE id=?", (db_id,))
-        conn.commit()
-        conn.close()
-
-        # UPDATE 之后 books 不再引用，若 evidences 仍引用则 safe_delete_file 会自动保护
+        # ★ 修改3：从 evidences 表删除记录，再尝试删除物理文件
+        delete_evidence_record('book', str(db_id), 'auth_pdf')
         safe_delete_file(old_path)
+
         self.parent_page.refresh_table()
 
 
@@ -322,39 +318,36 @@ class BooksPage(QWidget):
             ["选择", "平台书号(必填)", "作品名(必填)", "作品曾用名", "笔名", "权利人(必填)",
              "百度CP号(必填)", "维权书(必填)"])
 
-        # ★ 设置表头高度和列宽模式（与 links 保持一致）
+        # ★ 设置表头高度和列宽模式（类似 Spider，自动铺满）
         header = self.table.horizontalHeader()
-        header.setFixedHeight(35)  # 表头高度改为 35
+        header.setFixedHeight(35)
 
-        # 模式设定：默认固定宽度，但最后一列（维权书）自动拉伸填满右侧
-        header.setSectionResizeMode(QHeaderView.Interactive)
+        # 1. 默认全部列使用自动拉伸（平分剩余空间）
+        header.setSectionResizeMode(QHeaderView.Stretch)
+
+        # 2. 第 0 列（勾选）固定宽度
         header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
-
-        # 初始列宽设定
         self.table.setColumnWidth(0, 40)
-        self.table.setColumnWidth(1, 110)  # 平台书号
-        self.table.setColumnWidth(2, 180)  # 作品名
-        self.table.setColumnWidth(3, 140)  # 作品曾用名
-        self.table.setColumnWidth(4, 90)  # 笔名
-        self.table.setColumnWidth(5, 120)  # 权利人
-        self.table.setColumnWidth(6, 140)  # 百度CP号
+
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(2, 60)
+
+        # 3. 第 7 列（维权书）固定宽度，给它留足空间（350px）
+        header.setSectionResizeMode(7, QHeaderView.Fixed)
+        self.table.setColumnWidth(7, 350)
+
+        # ★ 删除所有手动 setColumnWidth(1~6) 的代码，让它们自动拉伸
 
         self.table.verticalHeader().setDefaultSectionSize(32)  # ★ 正文行高改窄
         self.table.setAlternatingRowColors(False)  # ★ 取消正文交替灰底
 
         # ★ 强制覆盖表头底纹颜色，使其与 links 页面的 #F5F5F5 完全一致
-        header_style = f"""
-            QHeaderView::section {{
-                background-color: {BG_HOVER};
-                font-weight: bold;
-                padding: 6px;
-                border: none;
-                border-bottom: 1px solid {BORDER_SOFT};
-                color: {TEXT_DARK};
-            }}
-        """
-        self.table.setStyleSheet(TABLE_BASE + header_style)
+        # ★ 公共骨架（只作用于水平表头）+ QSS 拼灰底（默认 QHeaderView 无自绘）
+        self.table.setStyleSheet(
+            TABLE_BASE
+            + TABLE_HEADER_BASE
+            + f"QHeaderView::section:horizontal {{ background-color: {HEADER_BG_COLOR}; }}"
+        )
 
         self.table.setItemDelegateForColumn(0, CenteredCheckBoxDelegate(self.table))
         self.table.setItemDelegateForColumn(1, PatternCellDelegate(parent=self.table))
@@ -367,7 +360,9 @@ class BooksPage(QWidget):
             QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
 
         self.table.itemChanged.connect(self.on_item_changed)
-        self.table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+        # ★ 使用公共同步组件
+        self.check_sync = SelectionCheckSync(self.table)
+
         self.table.verticalScrollBar().valueChanged.connect(self.save_scroll)
 
         # ★ 允许表格被无限压窄，防止撑大主窗口
@@ -376,6 +371,13 @@ class BooksPage(QWidget):
         layout.addWidget(self.table)
         self.refresh_table()
 
+        self.col_persister = ColumnWidthPersister(
+            view=self.table,
+            settings=self.settings,
+            key="books_col_widths"
+        )
+        self.col_persister.attach()
+
     def _row_ids_valid(self, row):
         for col in (1, 6):
             cell = self.table.item(row, col)
@@ -383,32 +385,36 @@ class BooksPage(QWidget):
                 return False
         return True
 
+    def _update_required_styles(self, row):
+        if self._is_updating:
+            return
+
+        required_cols = [1, 2, 5, 6]  # 平台书号, 作品名, 权利人, 百度CP号
+
+        id_item = self.table.item(row, 1)
+        is_saved = bool(id_item and id_item.data(Qt.UserRole))
+
+        is_blank_new_row = True
+        if is_saved:
+            is_blank_new_row = False
+        else:
+            for c in range(1, 7):
+                it = self.table.item(row, c)
+                if it and it.text().strip():
+                    is_blank_new_row = False
+                    break
+
+        self.table.blockSignals(True)
+        for c in required_cols:
+            item = self.table.item(row, c)
+            if not item: continue
+            is_missing = not is_blank_new_row and not item.text().strip()
+            apply_required_style(item, is_missing)
+        self.table.blockSignals(False)
+
     def save_scroll(self, value):
         if self._is_updating: return
         self.settings.setValue("books_scroll_pos", value)
-
-    def on_selection_changed(self, selected, deselected):
-        if self._is_updating:
-            return
-        self._is_updating = True
-        try:
-            selected_rows = set(idx.row() for idx in selected.indexes())
-            deselected_rows = set(idx.row() for idx in deselected.indexes())
-            deselected_rows -= selected_rows
-
-            for r in deselected_rows:
-                chk = self.table.item(r, 0)
-                if chk and (chk.flags() & Qt.ItemIsUserCheckable):
-                    if chk.checkState() != Qt.Unchecked:
-                        chk.setCheckState(Qt.Unchecked)
-
-            for r in selected_rows:
-                chk = self.table.item(r, 0)
-                if chk and (chk.flags() & Qt.ItemIsUserCheckable) and chk.data(Qt.UserRole):
-                    if chk.checkState() != Qt.Checked:
-                        chk.setCheckState(Qt.Checked)
-        finally:
-            self._is_updating = False
 
     def open_import_dialog(self):
         dialog = ImportBooksDialog(self)
@@ -517,6 +523,13 @@ class BooksPage(QWidget):
         if reply == QMessageBox.Yes:
             conn = get_conn()
             for row, db_id in sorted(rows_to_delete, reverse=True):
+                # ★ 修改4：批量删除时，顺手把物理文件清理掉
+                evs = conn.execute("SELECT file_path FROM evidences WHERE owner_type='book' AND owner_key=?",
+                                   (str(db_id),)).fetchall()
+                for ev in evs:
+                    if ev[0]:
+                        safe_delete_file(ev[0])
+
                 conn.execute("DELETE FROM books WHERE id=?", (db_id,))
                 conn.execute("DELETE FROM evidences WHERE owner_type='book' AND owner_key=?", (str(db_id),))
                 self.table.removeRow(row)
@@ -532,6 +545,7 @@ class BooksPage(QWidget):
         row = item.row()
 
         if not self._row_ids_valid(row):
+            self.table.viewport().update()
             return
 
         platform_id = self.table.item(row, 1).text().strip() if self.table.item(row, 1) else ""
@@ -583,6 +597,8 @@ class BooksPage(QWidget):
             self.refresh_table()
             if new_id:
                 self._focus_row_by_db_id(new_id)
+        else:
+            self._update_required_styles(row)  # ★ 数据更新后刷新必填样式
 
     def refresh_table(self):
         self._is_updating = True
@@ -590,21 +606,36 @@ class BooksPage(QWidget):
         self.table.setRowCount(0)
         conn = get_conn()
 
-        records = conn.execute(
-            "SELECT id, platform_id, baidu_id, name, pen_name, aliases, evidence_path, rights_holder FROM books").fetchall()
+        # ★ 修改5：直接从 evidences 表 JOIN 出 auth_pdf
+        records = conn.execute("""
+                               SELECT b.id,
+                                      b.platform_id,
+                                      b.baidu_id,
+                                      b.name,
+                                      b.pen_name,
+                                      b.aliases,
+                                      b.rights_holder,
+                                      e.file_path AS evidence_path
+                               FROM books b
+                                        LEFT JOIN evidences e
+                                                  ON e.owner_type = 'book'
+                                                      AND e.owner_key = CAST(b.id AS TEXT)
+                                                      AND e.ev_type = 'auth_pdf'
+                               """).fetchall()
 
         for data in records:
             row = self.table.rowCount()
             self.table.insertRow(row)
 
+            # ★ 注意：列顺序变了，rights 变成了 data[6]，evidence_path 变成了 data[7]
             db_id = data[0]
             platform_id = data[1]
             baidu_id = data[2]
             name = data[3]
             pen = data[4]
             alias = data[5]
-            evidence_path = data[6]
-            rights = data[7]
+            rights = data[6]
+            evidence_path = data[7]
 
             chk_item = QTableWidgetItem()
             chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -636,3 +667,6 @@ class BooksPage(QWidget):
 
         saved_pos = int(self.settings.value("books_scroll_pos", 0))
         self.table.verticalScrollBar().setValue(saved_pos)
+
+        for r in range(self.table.rowCount()):
+            self._update_required_styles(r)

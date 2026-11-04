@@ -1,7 +1,7 @@
 # search_batch_queries.py
 """
 检索控制台批次查询。
-已全面切换至 draft_links 表读取草稿数据。
+已全面切换至全局工作台模式：无视 batch_id，所有草稿统一展示。
 """
 
 from db_config import get_conn
@@ -26,26 +26,14 @@ _SELECT_FIELDS_SITES = ("id, name, body_text, site_url, book_name, category, tar
                         "crawl_status, domain_matched, attr, original_title, "
                         "first_url, second_url, is_mobile")
 
-def _build_cond(batch_id):
-    if batch_id == "LEGACY_BATCH":
-        return "(batch_id IS NULL OR batch_id = '')", []
-    return "batch_id = ?", [batch_id]
-
 def find_latest_draft_batch():
-    """查找最近一条未处理完的草稿批次，用于页面恢复。"""
-    conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT batch_id FROM draft_links WHERE crawl_status IN (?, ?, ?, ?) ORDER BY id DESC LIMIT 1",
-            (CRAWL_STATUS_PENDING, CRAWL_STATUS_UNMATCHED, CRAWL_STATUS_PARSE_FAILED, CRAWL_STATUS_ORGANIZED)
-        ).fetchone()
-        if not row:
-            return None
-        return row[0] if row[0] else "LEGACY_BATCH"
-    finally:
-        conn.close()
+    """兼容旧接口：现在全局工作台已不需要查最新批次了，直接返回 'ALL'"""
+    return "ALL"
 
-def get_batch_tables(batch_id):
+def get_batch_tables(batch_id=None):
+    """
+    ★ 核心修改：无视传入的 batch_id，永远查询全局草稿数据。
+    """
     empty = {
         "pending": [], "confirmed": [], "unknown": [],
         "unmatched": [], "failed": [], "duplicate": [],
@@ -53,15 +41,13 @@ def get_batch_tables(batch_id):
         "tab1_todo": [], "tab2_pending": [], "tab3_archive": [],
         "stats": {}
     }
-    if not batch_id:
-        return empty
 
-    cond, params = _build_cond(batch_id)
     conn = get_conn()
     try:
+        # 不再拼装 batch_id 条件，直接查全表
         def q_draft(extra_cond, extra_params, order="ORDER BY id DESC"):
-            sql = f"SELECT {_SELECT_FIELDS} FROM draft_links WHERE {extra_cond} AND {cond} {order}"
-            return conn.execute(sql, extra_params + params).fetchall()
+            sql = f"SELECT {_SELECT_FIELDS} FROM draft_links WHERE {extra_cond} {order}"
+            return conn.execute(sql, extra_params).fetchall()
 
         history_records = conn.execute(f"SELECT {_SELECT_FIELDS_SITES} FROM sites ORDER BY id DESC").fetchall()
 
@@ -75,13 +61,13 @@ def get_batch_tables(batch_id):
         res_whitelist = q_draft("crawl_status = ?", [CRAWL_STATUS_WHITELIST])
         res_ignored = q_draft("crawl_status = ?", [CRAWL_STATUS_IGNORED])
 
-        # ★ 合并为 3 个大 Tab 的数据
+        # 合并为 3 个大 Tab 的数据
         tab1_todo = res_confirmed + res_unknown + res_unmatched
         tab2_pending = res_pending + res_failed
         tab3_archive = res_duplicate + res_whitelist + res_ignored
 
-        # ★ 统计数据
-        manual_count = conn.execute(f"SELECT COUNT(*) FROM draft_links WHERE {cond} AND attr = '手动获取'", params).fetchone()[0]
+        # 统计数据
+        manual_count = conn.execute("SELECT COUNT(*) FROM draft_links WHERE attr = '手动获取'").fetchone()[0]
         stats = {
             "明确资源": len(res_confirmed),
             "未知网站": len(res_unknown),

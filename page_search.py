@@ -11,6 +11,7 @@ from qfluentwidgets import SimpleCardWidget  # ★ 引入 Fluent 卡片
 from db_schema import ensure_schema
 from ws_server import set_app_mode, current_context
 from search_result_panel import SearchResultPanel, ToastLabel
+from mobile_url_utils import resolve_is_mobile
 
 # ★ 拆分出的两个子面板
 from search_input_panel import SearchInputPanel
@@ -120,12 +121,16 @@ class SearchConsolePage(QWidget):
     def _on_request_preview(self, db_id, raw_url, category, book_name, is_mobile=0):
         if not raw_url:
             return
+        is_mobile = resolve_is_mobile(is_mobile, raw_url)
         self.active_preview_db_id = db_id
 
         if getattr(self, 'focus_window', None) and self.focus_window.isVisible():
             from PySide6.QtCore import QUrl
             self.focus_window.setWindowTitle(f"专注预览: {book_name or '未知作品'}")
             # ★ 新增：UA 模式变了就切（不动窗口布局）
+
+            self.focus_window._preview_url = raw_url
+
             cur = int(bool(getattr(self.focus_window, "is_mobile", 0)))
             if int(bool(is_mobile)) != cur:
                 self.focus_window.set_mobile_mode(is_mobile)

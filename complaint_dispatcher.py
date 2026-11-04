@@ -9,12 +9,13 @@ from auto_complaint_quark import run_auto_complaint_quark, AutoComplaintSignals
 from auto_complaint_uc import run_auto_complaint_uc
 from auto_complaint_baidu import run_auto_complaint_baidu
 from auto_complaint_xunlei import run_auto_complaint_xunlei
+from auto_complaint_wenxin import run_auto_complaint_wenxin
 
 from browser_manager import BrowserManager
 
 # ★ 平台代号常量
 from app_data import (
-    PLATFORM_BAIDU, PLATFORM_QUARK, PLATFORM_UC, PLATFORM_XUNLEI, PLATFORM_OTHER,
+    PLATFORM_BAIDU, PLATFORM_QUARK, PLATFORM_UC, PLATFORM_XUNLEI, PLATFORM_WENXIN, PLATFORM_OTHER,
     PLATFORM_EXECUTION_ORDER,
 )
 
@@ -28,6 +29,7 @@ PLATFORM_ROUTER = {
     PLATFORM_UC: run_auto_complaint_uc,
     PLATFORM_BAIDU: run_auto_complaint_baidu,
     PLATFORM_XUNLEI: run_auto_complaint_xunlei,
+    PLATFORM_WENXIN: run_auto_complaint_wenxin,
 }
 
 
@@ -125,6 +127,22 @@ class ComplaintDispatcher(QObject):
             self.batch_success.emit(self.initial_batch)
         return success
 
+    wenxin_pick_summary_ready = Signal(dict)  # ★ 新增：任务全部结束后，抛给 UI
+
+    def _aggregate_wenxin_stats(self):
+        # 把池子里的数据清空并汇总
+        buf = getattr(self.complaint_signals, "wenxin_pick_stats_buffer", None) or []
+        if not buf:
+            return {}
+        total = sum(s.get("total", 0) for s in buf)
+        saved = sum(s.get("saved", 0) for s in buf)
+        failed = []
+        for s in buf:
+            for f in s.get("failed", []):
+                failed.append({**f, "book": s.get("book", "")})
+        buf.clear()
+        return {"total": total, "saved": saved, "failed": failed}
+
     def _run_all(self):
         """全批循环处理模式"""
         queue_snapshot = list(self.batches)
@@ -183,3 +201,4 @@ class ComplaintDispatcher(QObject):
                 break
 
         return (not has_failure) and (not stopped)
+

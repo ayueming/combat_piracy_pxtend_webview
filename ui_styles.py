@@ -86,7 +86,12 @@ TEXT_MUTED = "#999999"
 TEXT_DISABLED = "#9CA3AF"
 
 # 表格选中行底纹
-ROW_SELECTED_BG = BG_HOVER
+ROW_SELECTED_BG = "#DCF6EA"
+
+CELL_REQUIRED_BG = ERROR_BG            # 必填缺失：红底，文字色不变
+CELL_ERROR_SELECTED_BG = ERROR_BG_SELECTED   # 必填缺失选中态
+CELL_INVALID_BG = ERROR_BG             # 格式非法：红底 + 红字
+CELL_INVALID_FG = DANGER_RED
 
 
 # ================= 按钮公共片段 =================
@@ -297,17 +302,17 @@ def btn_link_style(color, hover_color):
 
 # 可编辑主表格（带交替行）
 TABLE_BASE = f"""
-    QTableWidget {{
+    QTableView, QTableWidget {{
         background-color: {BG_WHITE};
-        alternate-background-color: {BG_SOFT};
         color: {TEXT_DARK};
-        gridline-color: {BORDER_SOFT};
+        gridline-color: {BORDER_LIGHT};  /* ← 从 BORDER_SOFT 改成 BORDER_LIGHT，让网格线清晰可见 */
         outline: none;
     }}
-    QTableWidget::item {{
-        margin: 0px; padding: 0px; border-bottom: 1px solid {BORDER_SOFT};
+    QTableView::item, QTableWidget::item {{
+        /* 删掉 border-bottom，完全交给 gridline 渲染，避免重叠 */
+        margin: 0px; padding: 0px; 
     }}
-    QTableWidget::item:selected {{
+    QTableView::item:selected, QTableWidget::item:selected {{
         background-color: {ROW_SELECTED_BG}; color: {TEXT_DARK};
     }}
 """
@@ -323,23 +328,33 @@ TABLE_READONLY = f"""
 """
 
 # 带交替行的只读表格（历史记录）
-TABLE_READONLY_ALT = f"""
-    QTableWidget {{
-        border: 1px solid {BORDER_SOFT}; border-radius: 4px; alternate-background-color: #FAFAFA;
-    }}
-    QTableWidget::item:selected {{
-        background-color: {ROW_SELECTED_BG}; color: {TEXT_DARK};
-    }}
-"""
+TABLE_READONLY_ALT = TABLE_READONLY
 
 
 # ================= 表头 =================
 
-HEADER_BASE = f"""
-    QHeaderView::section {{
-        background-color: {BG_SOFT}; font-weight: bold; padding: 6px;
-        border: none; border-bottom: 1px solid {BORDER_SOFT}; color: {TEXT_DARK};
+# ★ 表头底色唯一来源（改色只改这一行）
+HEADER_BG_COLOR = BG_WHITE
+
+# ★ 公共骨架：只作用于水平表头，不含任何 background 声明
+#   使用方需自己拼一行：
+#     普通 QHeaderView     → QHeaderView::section:horizontal { background-color: HEADER_BG_COLOR; }
+#     自绘 header（有 fillRect）→ QHeaderView::section:horizontal { background: transparent; }
+TABLE_HEADER_BASE = f"""
+    QHeaderView::section:horizontal {{
+        font-weight: bold;
+        padding: 6px;
+        border: none;
+        border-bottom: 1px solid {BORDER_SOFT};
+        border-right: 1px solid {BORDER_SOFT};
+        color: {TEXT_DARK};
     }}
+"""
+
+# 兼容旧名（旧页面可能 import HEADER_BASE）；
+# 语义 = 公共骨架 + 默认灰底，等价于普通 QHeaderView 的写法
+HEADER_BASE = TABLE_HEADER_BASE + f"""
+    QHeaderView::section:horizontal {{ background-color: {HEADER_BG_COLOR}; }}
 """
 
 

@@ -1,31 +1,21 @@
 # page_spider.py
 # ================================================================
-# ★ 待抓取页面分类维护说明
+# 待抓取页数据来源说明
 # ----------------------------------------------------------------
-# 待抓取页显示的 sites 数据 = 从 sites 表中"排除"以下分类后的结果：
+# 本页显示的 sites 数据 = category 属于 MODULE_SEARCH 的记录：
+#   当前 = "百度搜索" / "夸克搜索" / "uc搜索"
 #
-#   1. 在 PLATFORM_DOMAINS 注册过域名的分类
-#      （网盘 / 知道 / 贴吧 / 暂未开通 等，链接本身就是资源页，无需抓章节）
-#   2. 搜索引擎（百度搜索 / 夸克搜索 / uc搜索）
+# 其他 module 不进入本页：
+#   - MODULE_NETDISK：网盘链接，无需抓章节
+#   - MODULE_FORUM  ：未来论坛 tab 处理
+#   - MODULE_PANSITE：有内部搜索逻辑
+#   - MODULE_OTHER  ：垃圾/兜底，有意不兜底
 #
-# 其余分类（如 "其他" 以及以后新增的小说站/资源站）视为
-# 【一般网站资源】，会出现在待抓取页，供抓取章节。
-#
-# 如果要让一个新分类【不进】待抓取页：
-#   → 去 app_data/complaint_platform_consts.py 的 PLATFORM_DOMAINS 里
-#     为该分类注册一个域名（顺便 PLATFORM_CONFIG 也要注册显示名），
-#     本文件会自动生效，无需改动。
-#
-# 如果要让一个新分类【进】待抓取页（普通小说站）：
-#   → 只在 PLATFORM_CONFIG 注册显示名，【不要】加进 PLATFORM_DOMAINS 即可。
-#
-# 排除名单的推导逻辑见 app_data/spider_consts.py。
+# 新增搜索引擎：只在 complaint_platform_consts.PLATFORM_CONFIG
+# 登记 MODULE_SEARCH，本页自动生效，无需改本文件。
 # ================================================================
 import sqlite3
-import time
-import re
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
                                QTableWidgetItem, QHeaderView, QMessageBox, QAbstractItemView,
                                QPushButton, QApplication, QComboBox, QLineEdit, QDialog,
@@ -37,16 +27,17 @@ from PySide6.QtCore import (Qt, QUrl, QPoint, QRect, QEvent,
 from PySide6.QtGui import (QColor, QFont, QStandardItemModel, QStandardItem,
                            QPainter, QPen, QPainterPath, QPolygon, QCursor)
 
-from playwright.sync_api import sync_playwright
+from app_data.complaint_platform_consts import PLATFORM_CONFIG, MODULE_SEARCH
+from app_data import ALL_SUB_PLATFORMS
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except ImportError:
-    QWebEngineView = None
-
-from db_config import get_conn
+from spider_crawler import crawl_sites
 from feature_extractor import extract_pure_feature
-from chapter_extractor import is_target_chapter
+from db_config import get_conn
+
+from picker_web_view import PickerWebView
+from app_data.crawl_status_consts import CRAWL_STATUS_ORGANIZED
+
+
 from ui_components import (
     ExcelFilterProxyModel, FilterHeaderView, CenteredCheckBoxDelegate,
     CheckListDelegate,
@@ -56,11 +47,17 @@ from ui_components import (
     HEADER_TRIANGLE_COLOR, HEADER_TRIANGLE_ACTIVE_COLOR,
 )
 
+from ui_styles import ROW_SELECTED_BG, TABLE_HEADER_BASE, BORDER_LIGHT
 # ★ 引入权限管理器
 from license_manager import license_mgr
 
-# ★ 待抓取页排除名单（从 PLATFORM_DOMAINS 推导，见 spider_consts.py）
-from app_data.spider_consts import NO_CHAPTER_CRAWL_CATEGORIES
+
+SEARCH_MODULE_CATEGORIES = [
+    display_name
+    for sub_list in PLATFORM_CONFIG.values()
+    for display_name, _p, m_code, _w, _a in sub_list
+    if m_code == MODULE_SEARCH
+]
 
 
 # ================= Spider 专属：状态下拉框与代理 =================
@@ -139,7 +136,7 @@ class SpiderStatusComboDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
 
         if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect, QColor("#E8F5E9"))
+            painter.fillRect(option.rect, QColor(ROW_SELECTED_BG))
         else:
             painter.fillRect(option.rect, QColor("#FFFFFF"))
 
@@ -334,10 +331,16 @@ class SpiderHeaderView(QHeaderView):
     def paintSection(self, painter, rect, logical_index):
         if logical_index == -1:
             painter.fillRect(rect, QColor(HEADER_BG_COLOR))
+            # ★ 补底边和右边线
+            painter.setPen(QColor(BORDER_LIGHT))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            painter.drawLine(rect.topRight(), rect.bottomRight())
             return
 
         if logical_index == 0:
             painter.fillRect(rect, QColor(HEADER_BG_COLOR))
+
+            # ★ 完整恢复的全选计算逻辑
             parent_table = self.parent()
             all_checked = True
             has_data = False
@@ -351,7 +354,13 @@ class SpiderHeaderView(QHeaderView):
                             break
             if not has_data:
                 all_checked = False
+
             draw_checkbox(painter, rect, all_checked)
+
+            # ★ 补底边和右边线
+            painter.setPen(QColor(BORDER_LIGHT))
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            painter.drawLine(rect.topRight(), rect.bottomRight())
             return
 
         painter.save()
@@ -509,20 +518,138 @@ class SpiderSourceTable(QTableWidget):
 
 
 class WebPreviewDialog(QDialog):
-    def __init__(self, url, parent=None):
+    def __init__(self, parent, preview_url, book_name, category, is_mobile, books):
         super().__init__(parent)
-        self.setWindowTitle(f"网页预览 - {url}")
+        self.setWindowTitle(f"网页预览 - {preview_url}")
         self.resize(1000, 800)
+
+        self._book_name = book_name
+        self._category = category
+        self._books = books
+        self._is_mobile = int(bool(is_mobile))
+        self.picker = None
+
+        self._preview_url = preview_url  # ★ 1. 把这一行提前到这里
+        self._has_loaded = False  # ★ 顺便把加载标记也初始化一下
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        if QWebEngineView:
-            self.browser = QWebEngineView()
-            self.browser.setUrl(QUrl(url))
-            layout.addWidget(self.browser)
-        else:
-            label = QLabel("未检测到 QWebEngineView 模块，无法预览网页。")
-            label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(label)
+
+        self.picker = PickerWebView(
+            self,
+            context_provider=self._build_ctx,
+            lock_mode="previewing",
+            allow_change_book=True,
+            allow_change_category=True,
+            initial_is_mobile=self._is_mobile,
+        )
+
+        if not self.picker.is_locked_by_us():
+            try:
+                self.picker.web_view.stop()
+                self.picker.web_view.setUrl(QUrl("about:blank"))
+            except Exception:
+                pass
+            self.picker.deleteLater()
+            self.picker = None
+            QMessageBox.information(
+                self, "暂时无法预览",
+                "后台正在执行搜索或解析任务，请等待完成后再预览。\n"
+                "（其他预览窗口也会占用此锁，请先关闭）"
+            )
+            return
+
+        layout.addWidget(self.picker)
+
+        from parser_service import parser_signals
+        parser_signals.parse_finished.connect(self._on_parse_finished)
+        self.picker.batch_saved.connect(self._on_batch_saved)
+
+    def _build_ctx(self):
+        return {
+            "book_name": self._book_name,
+            "category": self._category,
+            "keyword": "",
+            "batch_id": "SPIDER_PICK",
+            "source_platform": self._category,
+            "parent_url": self._preview_url,
+            "books": self._books,
+            "categories": list(ALL_SUB_PLATFORMS),
+        }
+
+    def _on_batch_saved(self, bid):
+        try:
+            from search_result_panel import ToastLabel
+            ToastLabel(self, "📦 已提交解析", "#3B82F6")
+        except Exception as e:
+            print(f"[Spider Preview] Toast 提示失败: {e}")
+
+    def _on_parse_finished(self, *args):
+        # 兼容 parse_finished 可能是 Signal(bool) 或 Signal(bool, str)
+        success = args[0] if len(args) >= 1 else False
+        try:
+            self._spider_post_process()
+        except Exception as e:
+            print(f"[Spider Preview] 后处理失败: {e}")
+
+        # ★ 核心改动：只加这一段，通知背后的 SpiderPage 刷新表格
+        parent_page = self.parent()
+        if parent_page and hasattr(parent_page, "refresh_data"):
+            parent_page.refresh_data()
+
+        if success:
+            try:
+                from search_result_panel import ToastLabel
+                ToastLabel(self, "✅ 解析完成", "#10B981")
+            except Exception:
+                pass
+
+    def _spider_post_process(self):
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, crawl_status, domain_matched, category "
+                "FROM draft_links WHERE batch_id = 'SPIDER_PICK'"
+            ).fetchall()
+
+            archive_items, delete_ids = [], []
+            for db_id, status, dm, cat in rows:
+                if status == CRAWL_STATUS_ORGANIZED:
+                    # ★ 核心修改：不管是明确资源(dm=1)还是未知网站(dm=0)，统统直接入库
+                    archive_items.append((db_id, cat))
+                else:
+                    # 重复、白名单、黑名单、解析失败，直接删掉
+                    delete_ids.append(db_id)
+
+            if archive_items:
+                from link_ingest_service import archive_batch_by_ids
+                archive_batch_by_ids(archive_items, [], [])
+            if delete_ids:
+                ph = ','.join('?' * len(delete_ids))
+                conn.execute(f"DELETE FROM draft_links WHERE id IN ({ph})", delete_ids)
+                conn.commit()
+        finally:
+            conn.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # ★ 关键：延迟到窗口显示后再加载，防止 QDialog 渲染未就绪导致白屏
+        if not getattr(self, "_has_loaded", False) and getattr(self, "_preview_url", None):
+            self._has_loaded = True
+            self.picker.load_url(self._preview_url)
+
+    def closeEvent(self, event):
+        try:
+            from parser_service import parser_signals
+            parser_signals.parse_finished.disconnect(self._on_parse_finished)
+        except Exception:
+            pass
+
+        if getattr(self, "picker", None):
+            self.picker.release_lock()  # 仅释放锁
+            self.picker = None
+
+        event.accept()
 
 
 class SpiderPage(QWidget):
@@ -536,20 +663,20 @@ class SpiderPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        # ================= 1. 顶部标题区 =================
-        title_layout = QHBoxLayout()
-        title_vbox = QVBoxLayout()
-        title_vbox.setSpacing(8)
-        main_title = QLabel("【待抓取的页面】")
-        main_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F1F1F;")
-        sub_title = QLabel("双击任意行的“页面链接”即可预览网页。勾选后点击右侧按钮开始提取章节。")
-        sub_title.setStyleSheet("font-size: 13px; color: #888888;")
-        sub_title.setWordWrap(True) # ★ 加上防撑爆换行
-        title_vbox.addWidget(main_title)
-        title_vbox.addWidget(sub_title)
-        title_layout.addLayout(title_vbox)
-        title_layout.addStretch()
-        layout.addLayout(title_layout)
+        # # ================= 1. 顶部标题区 =================
+        # title_layout = QHBoxLayout()
+        # title_vbox = QVBoxLayout()
+        # title_vbox.setSpacing(8)
+        # main_title = QLabel("【待抓取的页面】")
+        # main_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F1F1F;")
+        # sub_title = QLabel("双击链接即可预览网页。")
+        # sub_title.setStyleSheet("font-size: 13px; color: #888888;")
+        # sub_title.setWordWrap(True) # ★ 加上防撑爆换行
+        # title_vbox.addWidget(main_title)
+        # title_vbox.addWidget(sub_title)
+        # title_layout.addLayout(title_vbox)
+        # title_layout.addStretch()
+        # layout.addLayout(title_layout)
 
         # ================= 2. 卡片式工具栏 =================
         tool_frame = QFrame()
@@ -564,7 +691,7 @@ class SpiderPage(QWidget):
         tool_layout.setContentsMargins(15, 10, 15, 10)
         tool_layout.setSpacing(10)
 
-        lbl_status = QLabel("状态筛选:")
+        lbl_status = QLabel("待抓取链接:")
         lbl_status.setStyleSheet("color: #495057; font-weight: bold; border: none;")
         tool_layout.addWidget(lbl_status)
 
@@ -579,29 +706,6 @@ class SpiderPage(QWidget):
         tool_layout.addWidget(self.status_filter)
 
         tool_layout.addSpacing(20)
-
-        lbl_rule = QLabel("章节提取规则:")
-        lbl_rule.setStyleSheet("color: #495057; font-weight: bold; border: none;")
-        tool_layout.addWidget(lbl_rule)
-
-        self.rule_combo = QComboBox()
-        self.rule_combo.addItems(["第X章", "第X节", "分节阅读X", "纯数字", "自定义关键字"])
-        self.rule_combo.setStyleSheet("""
-            QComboBox { border: 1px solid #CCCCCC; border-radius: 4px; padding: 4px 8px; background: #FFF; min-width: 100px; color: #333; }
-            QComboBox:hover { border: 1px solid #1F1F1F; }
-        """)
-        self.rule_combo.currentTextChanged.connect(self.toggle_custom_input)
-        tool_layout.addWidget(self.rule_combo)
-
-        self.custom_input = QLineEdit()
-        self.custom_input.setPlaceholderText("关键字")
-        self.custom_input.setFixedWidth(100)
-        self.custom_input.setStyleSheet("""
-            QLineEdit { border: 1px solid #CCCCCC; border-radius: 4px; padding: 4px 8px; background: #FFF; color: #333; }
-            QLineEdit:focus { border: 1px solid #1F1F1F; }
-        """)
-        self.custom_input.hide()
-        tool_layout.addWidget(self.custom_input)
 
         tool_layout.addStretch()
 
@@ -625,6 +729,7 @@ class SpiderPage(QWidget):
 
         # ================= 3. 待抓取表格 =================
         self.source_table = SpiderSourceTable()
+
         self.source_table.setColumnCount(9)
         self.source_table.setHorizontalHeaderLabels(
             ["勾选", "关联作品", "分类", "页面链接", "名称", "属性", "抓取状态", "投诉时间", "资源状态"])
@@ -652,10 +757,15 @@ class SpiderPage(QWidget):
 
         self.source_table.selectionModel().selectionChanged.connect(self.on_source_selection_changed)
 
-        self.source_table.setStyleSheet("""
-            QTableWidget { border: 1px solid #E9ECEF; background-color: #FFFFFF; }
-            QTableWidget::item:selected { background-color: #E3F2FD; color: #333; }
-        """)
+        self.source_table.setShowGrid(True)
+        self.source_table.setStyleSheet(
+            f"""
+            QTableWidget {{ border: 1px solid #E9ECEF; background-color: #FFFFFF; }}
+            QTableWidget::item:selected {{ background-color: {ROW_SELECTED_BG}; color: #333; }}
+            """
+            + TABLE_HEADER_BASE
+            + "QHeaderView::section:horizontal { background: transparent; }"
+        )
         self.source_table.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding) # ★ 防撑爆
         layout.addWidget(self.source_table)
 
@@ -674,10 +784,15 @@ class SpiderPage(QWidget):
         self.result_view = QTableView()
         self.result_view.setModel(self.proxy_model)
 
-        self.result_view.setStyleSheet("""
-            QTableView { border: 1px solid #E9ECEF; background-color: #FFFFFF; }
-            QTableView::item:selected { background-color: #E3F2FD; color: #333; }
-        """)
+        self.result_view.setShowGrid(True)
+        self.result_view.setStyleSheet(
+            f"""
+            QTableView {{ border: 1px solid #E9ECEF; background-color: #FFFFFF; }}
+            QTableView::item:selected {{ background-color: {ROW_SELECTED_BG}; color: #333; }}
+            """
+            + TABLE_HEADER_BASE
+            + "QHeaderView::section:horizontal { background: transparent; }"
+        )
 
         res_header = FilterHeaderView(Qt.Horizontal, self.result_view)
         self.result_view.setHorizontalHeader(res_header)
@@ -754,31 +869,45 @@ class SpiderPage(QWidget):
                     item.setCheckState(Qt.Checked)
         self.result_view.viewport().update()
 
-    def toggle_custom_input(self, text):
-        if text == "自定义关键字":
-            self.custom_input.show()
-        else:
-            self.custom_input.hide()
-
     def on_cell_double_clicked(self, row, column):
-        if column == 3:
-            url = self.source_table.item(row, 3).text()
-            if url:
-                dialog = WebPreviewDialog(url, self)
-                dialog.exec()
+        if column != 3:
+            return
+        url = self.source_table.item(row, 3).text()
+        if not url:
+            return
+
+        data = self.source_table.item(row, 0).data(Qt.UserRole) or {}
+        is_mobile = data.get("is_mobile") or 0
+
+        book_name = self.source_table.item(row, 1).text()
+        if book_name == "未关联":
+            book_name = ""
+
+        category = self.source_table.item(row, 2).text() or "其他"
+
+        conn = get_conn()
+        try:
+            books = [r[0] for r in conn.execute("SELECT name FROM books ORDER BY name").fetchall()]
+        finally:
+            conn.close()
+
+        dlg = WebPreviewDialog(
+            self, url,
+            book_name=book_name,
+            category=category,
+            is_mobile=is_mobile,
+            books=books,
+        )
+        if dlg.picker:
+            dlg.exec()
 
     def refresh_data(self):
         self.source_table.setRowCount(0)
         conn = get_conn()
         cursor = conn.cursor()
 
-        # ★ 排除名单从 spider_consts 推导（见文件顶部说明）。
-        #   凡是在 PLATFORM_DOMAINS 注册了域名的分类（网盘 / 知道 / 贴吧 / 暂未开通）
-        #   + 搜索引擎，都不出现在待抓取页；其余视为一般网站资源，需要抓章节。
-        excluded = list(NO_CHAPTER_CRAWL_CATEGORIES)
-        placeholders = ",".join("?" * len(excluded))
-
-        # ★ 用 COALESCE 兜底，避免 category 为 NULL 时 NOT IN 结果非 True 导致整行漏掉
+        # ★ 正向筛：只取 MODULE_SEARCH 的分类（百度搜索 / 夸克搜索 / uc搜索）
+        placeholders = ",".join("?" * len(SEARCH_MODULE_CATEGORIES))
         query = f'''SELECT s.id,
                            COALESCE(b.name, s.book_name) as real_book_name,
                            s.category,
@@ -787,11 +916,12 @@ class SpiderPage(QWidget):
                            s.attr,
                            s.crawl_status,
                            s.resource_status,
-                           s.complaint_time
+                           s.complaint_time,
+                           s.is_mobile
                     FROM sites s
                     LEFT JOIN books b ON s.book_id = b.id
-                    WHERE COALESCE(s.category, '') NOT IN ({placeholders})'''
-        params = list(excluded)
+                    WHERE COALESCE(s.category, '') IN ({placeholders})'''
+        params = list(SEARCH_MODULE_CATEGORIES)
 
         filter_text = self.status_filter.currentText()
         if filter_text == "仅未抓取":
@@ -810,14 +940,18 @@ class SpiderPage(QWidget):
         conn.close()
 
         for row_data in records:
-            db_id, book_name, cat, url, name, attr, crawl_status, res_status, comp_time = row_data
+            db_id, book_name, cat, url, name, attr, crawl_status, res_status, comp_time, is_mobile = row_data
             row = self.source_table.rowCount()
             self.source_table.insertRow(row)
 
             chk = QTableWidgetItem()
             chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             chk.setCheckState(Qt.Unchecked)
-            chk.setData(Qt.UserRole, {"id": db_id, "comp_time": comp_time})
+            chk.setData(Qt.UserRole, {
+                "id": db_id,
+                "comp_time": comp_time,
+                "is_mobile": is_mobile,
+            })
             self.source_table.setItem(row, 0, chk)
 
             for col_idx, text in enumerate(
@@ -825,8 +959,15 @@ class SpiderPage(QWidget):
                     start=1):
                 item = QTableWidgetItem(text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
                 if col_idx == 3:
                     item.setToolTip("双击此行此列可预览网页")
+                    # ★ 新增：把链接列变成网页蓝 + 下划线
+                    item.setForeground(QColor("#3B82F6"))  # 这是网页常用的蓝色
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+
                 if col_idx == 6 and crawl_status == '已抓取':
                     item.setForeground(QColor("#10B981"))
                     font = item.font()
@@ -850,29 +991,19 @@ class SpiderPage(QWidget):
         self.source_table.horizontalHeader().viewport().update()
 
     def start_crawl(self):
-        # ★ 逻辑层拦截
         if license_mgr.is_expired:
             QMessageBox.warning(self, "授权已过期",
                                 "您的会员已过期，无法使用网页抓取功能。\n请前往【个人中心】查看详情或联系管理员续费。")
-            return
-
-        rule = self.rule_combo.currentText()
-        custom_kw = self.custom_input.text().strip()
-
-        if rule == "自定义关键字" and not custom_kw:
-            QMessageBox.warning(self, "提示", "请输入自定义关键字！")
             return
 
         rows_to_crawl = []
         for r in range(self.source_table.rowCount()):
             if self.source_table.isRowHidden(r):
                 continue
-
             chk_item = self.source_table.item(r, 0)
             if chk_item and chk_item.checkState() == Qt.Checked:
                 data = chk_item.data(Qt.UserRole)
                 db_id = data.get("id") if isinstance(data, dict) else None
-
                 book_name = self.source_table.item(r, 1).text()
                 if book_name == "未关联":
                     book_name = ""
@@ -897,119 +1028,33 @@ class SpiderPage(QWidget):
         total_chapters = 0
         total_intros = 0
         failed_sites = []
+        results = []
+        stats = []
 
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(ignore_https_errors=True)
-                page = context.new_page()
-
-                seen_codes = set()  # 跨网页去重
-
-                for db_id, book_name, cat, url, src_name, src_attr in rows_to_crawl:
-                    try:
-                        self.crawl_btn.setText(f"加载中...")
-                        QApplication.processEvents()
-
-                        page.goto(url, timeout=20000, wait_until="domcontentloaded")
-                        time.sleep(3)
-
-                        html_content = page.content()
-                        soup = BeautifulSoup(html_content, "html.parser")
-
-                        c_count, i_count = self.extract_chapters(soup, url, book_name, cat, rule, custom_kw,
-                                                                 src_name, db_id, seen_codes)
-                        total_chapters += c_count
-                        total_intros += i_count
-
-                        if c_count == 0 and i_count == 0:
-                            failed_sites.append(f"《{book_name or '未关联'}》- [{cat}]")
-
-                    except Exception as e:
-                        failed_sites.append(f"《{book_name or '未关联'}》- [{cat}] (加载失败)")
-                        print(f"抓取异常: {e}")
-
-                browser.close()
-
+            total_chapters, total_intros, failed_sites, results, stats = crawl_sites(
+                rows_to_crawl,
+                on_progress=lambda text: (self.crawl_btn.setText(text), QApplication.processEvents()),
+            )
+            for r in results:
+                self.add_result_row(
+                    r["book_name"], r["url"], r["category"],
+                    title=r["title"], name=r["name"], attr=r["attr"], source_id=r["source_id"],
+                )
         finally:
             self.crawl_btn.setText("🔗 开始抓取/提取")
-            # 恢复按钮时也要检查是否过期
             self.crawl_btn.setEnabled(not license_mgr.is_expired)
 
-            if total_chapters > 0 or total_intros > 0 or failed_sites:
+            if stats:
                 msg = "抓取完成！\n\n"
-                if total_chapters > 0:
-                    msg += f"✅ 提取到【{rule}】链接：{total_chapters} 条\n"
-                if total_intros > 0:
-                    msg += f"✅ 提取到【内容简介】链接：{total_intros} 条\n"
-
-                if failed_sites:
-                    msg += f"\n⚠️ 以下 {len(failed_sites)} 个网站未抓取到内容，请确认抓取规则：\n"
-                    for site in failed_sites:
-                        msg += f" - {site}\n"
-
+                for b_name, cat, dom, n, status in stats:
+                    if status == "failed":
+                        msg += f"《{b_name}》- [{cat}]：失败\n"
+                    else:
+                        msg += f"《{b_name}》- [{cat}]：成功获取链接 {n} 条\n"
                 QMessageBox.information(self, "抓取结果", msg)
             else:
-                QMessageBox.warning(self, "未提取到新链接", "网页加载了，但没有找到符合规则的新内容。")
-
-    def extract_chapters(self, soup, base_url, book_name, base_cat, rule, custom_kw, src_name, source_id, seen_codes):
-        chapter_found = 0
-        intro_found = 0
-        conn = get_conn()
-        cursor = conn.cursor()
-
-        for a in soup.find_all("a", href=True):
-            href = urljoin(base_url, a["href"])
-            title = a.get_text(strip=True)
-            if not title:
-                continue
-
-            if href.startswith("javascript:") or href.startswith("#"):
-                continue
-
-            is_intro = False
-            if any(kw in title for kw in ["简介", "内容简介", "作品简介", "小说简介"]):
-                match = re.search(r'《(.*?)》', title)
-                if match:
-                    t_book = match.group(1).strip()
-                    if book_name and t_book != book_name:
-                        is_intro = False
-                    else:
-                        is_intro = True
-                else:
-                    if book_name:
-                        if title in ["简介", "内容简介", "作品简介", "小说简介", "《内容简介》", "返回简介", "查看简介"]:
-                            is_intro = True
-                        elif book_name in title:
-                            is_intro = True
-                        else:
-                            is_intro = False
-                    else:
-                        is_intro = True
-
-            is_chapter = is_target_chapter(title, rule, custom_kw)
-
-            if is_chapter or is_intro:
-                code = extract_pure_feature(href)
-                if code in seen_codes:
-                    continue
-                if cursor.execute("SELECT id FROM sites WHERE feature_code=?", (code,)).fetchone():
-                    continue
-
-                seen_codes.add(code)
-
-                if is_intro:
-                    intro_found += 1
-                    attr_text = "抓取 内容简介"
-                else:
-                    chapter_found += 1
-                    attr_text = f"抓取 {title}"
-
-                self.add_result_row(book_name, href, base_cat, title=title, name=src_name,
-                                    attr=attr_text, source_id=source_id)
-
-        conn.close()
-        return chapter_found, intro_found
+                QMessageBox.warning(self, "未抓取到内容", "所有网页均未加载成功。")
 
     def add_result_row(self, book_name, url, category, title="", name="", attr="", source_id=None):
         chk_item = QStandardItem()

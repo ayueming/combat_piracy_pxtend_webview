@@ -15,6 +15,11 @@ from complaint_common import take_error_screenshot
 class AutoComplaintSignals(QObject):
     progress = Signal(str)
 
+    def __init__(self):
+        super().__init__()
+        # ★ 专门用来装文心拾取结果的池子（因为是串行执行，不需要加锁）
+        self.wenxin_pick_stats_buffer = []
+
 
 class BaseComplaintRunner:
     def __init__(self, complaints_data, signals=None, is_all=False, stop_event=None, login_event=None,
@@ -36,6 +41,7 @@ class BaseComplaintRunner:
         self.page = None
         self.temp_excel_path = ""
         self.task_success = False
+        self.temp_files = []  # ★ 新增：本次运行产生的所有临时文件，run() 结束时统一清理
 
         # 3. 子类必须覆盖的标识
         self.platform_code = ""
@@ -80,6 +86,58 @@ class BaseComplaintRunner:
             shot_path = take_error_screenshot(self.page, self.user_dir, self.platform_code)
             if shot_path:
                 self.log(f"📸 已保存失败现场截图: {shot_path}")
+
+    def wait_for_success_dialog(self, title_text="提交成功", timeout=20000,
+                                auto_close=True, required=True) -> bool:
+        """
+        等待 TDesign/CoDesign 体系的成功弹窗出现。
+
+        参数:
+            title_text  : 弹窗标题需要包含的文字（默认"提交成功"）
+            timeout     : 等待毫秒
+            auto_close  : 是否自动点击【我知道了】关闭弹窗
+            required    : True 时超时 raise（让 run() 判定失败）；
+                          False 时超时返回 False 不抛异常（仅用于观测）
+        """
+        self.log(f"⏳ 等待【{title_text}】弹窗...")
+
+        selector = (
+            f'.cos-dialog-container:has(.cos-dialog-title:has-text("{title_text}"))'
+        )
+        dlg = self.page.locator(selector).first
+
+        try:
+            dlg.wait_for(state="visible", timeout=timeout)
+            self.log(f"✅ 检测到【{title_text}】弹窗，提交成功")
+
+            if auto_close:
+                try:
+                    ok_btn = dlg.locator(".cos-dialog-ok")
+                    if ok_btn.count() > 0:
+                        ok_btn.click(force=True, timeout=3000)
+                        self.log("👌 已点击【我知道了】关闭弹窗")
+                        self.page.wait_for_timeout(600)
+                except Exception as e:
+                    self.log(f"⚠️ 关闭成功弹窗失败（忽略，不影响结果）: {e}")
+            return True
+
+        except Exception as e:
+            # 诊断：把当前页面所有 dialog 标题打出来，方便排查"是不是弹了别的失败框"
+            try:
+                titles = self.page.locator(".cos-dialog-title")
+                cnt = titles.count()
+                if cnt > 0:
+                    texts = [titles.nth(i).inner_text().strip() for i in range(cnt)]
+                    diag = f"提交后出现的弹窗标题：{texts}"
+                else:
+                    diag = "提交后未出现任何弹窗"
+            except Exception:
+                diag = "提交后弹窗读取失败"
+
+            if required:
+                raise RuntimeError(f"未等到【{title_text}】弹窗，{diag}")
+            self.log(f"⚠️ 未等到【{title_text}】弹窗，{diag}")
+            return False
 
     # ==================== 登录等待骨架 ====================
     def check_platform_login(self) -> bool:
@@ -193,6 +251,15 @@ class BaseComplaintRunner:
                 try:
                     os.remove(self.temp_excel_path)
                 except:
+                    pass
+
+            # 2. ★ 清理登记的所有临时文件（不管成败都删）
+            for p in self.temp_files:
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                        print(f"[{self.platform_logo}] 🧹 已清理临时文件: {os.path.basename(p)}")
+                except Exception:
                     pass
 
             # 2. 成功复用Tab，失败保留现场

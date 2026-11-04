@@ -5,6 +5,12 @@ import sys
 import asyncio
 import faulthandler
 
+# =========================================================
+# 🌟 核心修复：彻底禁用硬件加速和 WebGL，防止渲染进程崩溃
+# =========================================================
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
+# =========================================================
+
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QDialog
 from PySide6.QtCore import Qt, QEvent, QTimer, Signal, QEasingCurve
 
@@ -15,6 +21,7 @@ from qfluentwidgets import FluentWindow, NavigationItemPosition, FluentIcon as F
 from ws_server import start_ws_server, ws_signals
 
 # 导入你的页面模块
+from page_author import AuthorPage
 from page_books import BooksPage
 from page_links import LinksPage
 from page_search import SearchConsolePage
@@ -28,7 +35,7 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 
 
 # ==========================================
@@ -134,6 +141,9 @@ class MainApp(FluentWindow):
             self.resize(1400, 900)
 
         # ===== 1. 实例化所有页面 =====
+        self.author_page = AuthorPage(self)  # ★ 新增
+        self.author_page.setObjectName("authorPage")
+
         self.books_page = BooksPage(self)
         self.books_page.setObjectName("booksPage")
 
@@ -168,7 +178,7 @@ class MainApp(FluentWindow):
                 """)
 
         pages = [
-            self.books_page, self.links_page, self.search_page,
+            self.author_page, self.books_page, self.links_page, self.search_page,
             self.spider_page, self.complaint_page, self.platforms_page,
             self.evidence_page, self.profile_page
         ]
@@ -227,9 +237,10 @@ class MainApp(FluentWindow):
 
         # 添加页面到导航栏
         self.addSubInterface(self.books_page, FIF.LIBRARY, "作品管理")
-        self.addSubInterface(self.links_page, FIF.PENCIL_INK, "盗文链接")
+        self.addSubInterface(self.author_page, FIF.PEOPLE, "作者管理")
+        self.addSubInterface(self.links_page, FIF.PENCIL_INK, "链接管理")
         self.addSubInterface(self.search_page, FIF.GLOBE, "检索管理")
-        self.addSubInterface(self.spider_page, FIF.PASTE, "抓取管理")
+        self.addSubInterface(self.spider_page, FIF.LINK, "抓取管理")
         self.addSubInterface(self.complaint_page, FIF.SEND, "投诉管理")
         self.addSubInterface(self.platforms_page, FIF.TAG, "投诉平台")
         self.addSubInterface(self.evidence_page, FIF.FOLDER, "维权资料")
@@ -270,6 +281,8 @@ class MainApp(FluentWindow):
 
         if name == "linksPage":
             self.links_page.refresh_table()
+        elif name == "authorPage":
+            self.author_page.refresh_table()
         elif name == "searchPage":
             self.search_page.load_books()
             if hasattr(self.search_page, 'result_panel'):

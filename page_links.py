@@ -13,6 +13,12 @@ from db_config import get_conn
 from feature_extractor import extract_pure_feature, get_platform_category
 from data_importer import import_sites_from_file
 
+from complaint_service import prepare_complaints_data
+
+from app_data import PLATFORM_CONFIG, ALL_SUB_PLATFORMS, CAT_TO_CODE_MAP, PLATFORM_OTHER
+from app_data.complaint_platform_consts import HIDDEN_MAIN_CATEGORIES, HIDDEN_SUB_PLATFORMS
+from app_data.crawl_status_consts import CRAWL_STATUS_DONE
+
 from ui_components import (
     ExcelFilterProxyModel,
     FilterHeaderView,
@@ -20,12 +26,11 @@ from ui_components import (
     ComboCellDelegate,
     StatusComboDelegate,
     HintButton,
+    ColumnWidthPersister,
+    apply_required_style,
+    handle_check_column_click,  # ★ 新增
+    SelectionCheckSync,         # ★ 新增
 )
-from complaint_service import prepare_complaints_data
-
-from app_data import PLATFORM_CONFIG, ALL_SUB_PLATFORMS, CAT_TO_CODE_MAP, PLATFORM_OTHER
-from app_data.complaint_platform_consts import HIDDEN_MAIN_CATEGORIES, HIDDEN_SUB_PLATFORMS
-from app_data.crawl_status_consts import CRAWL_STATUS_DONE
 
 from ui_styles import (
     BTN_SECONDARY,
@@ -35,6 +40,8 @@ from ui_styles import (
     BTN_DANGER_OUTLINE,
     BTN_TOGGLE,
     BTN_TOGGLE_MAIN,
+    TABLE_BASE,
+    TABLE_HEADER_BASE,        # ★ 新增
 )
 
 from app_signals import signals
@@ -60,30 +67,14 @@ TABLE_HEADERS = [
 
 class LinksTableView(QTableView):
     def mousePressEvent(self, event):
+        # ★ 调用公共拦截函数
+        if handle_check_column_click(self, event, chk_col=COL_CHK):
+            event.accept()
+            return
+
         index = self.indexAt(event.pos())
         if index.isValid():
-            if index.column() == COL_CHK:
-                sel_model = self.selectionModel()
-                is_selected = sel_model.isRowSelected(index.row(), index.parent())
-                mods = event.modifiers()
-
-                self.setCurrentIndex(index)
-
-                if mods & (Qt.ControlModifier | Qt.ShiftModifier):
-                    if is_selected:
-                        sel_model.select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
-                    else:
-                        sel_model.select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
-                else:
-                    if is_selected:
-                        sel_model.select(index, QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
-                    else:
-                        sel_model.select(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
-
-                event.accept()
-                return
-
-            elif index.column() in (COL_BOOK, COL_CAT, COL_RES_STATUS):
+            if index.column() in (COL_BOOK, COL_CAT, COL_RES_STATUS):
                 model = self.model()
                 if index.column() == COL_RES_STATUS:
                     comp_time = model.index(index.row(), COL_COMP_TIME).data()
@@ -392,8 +383,19 @@ class LinksPage(QWidget):
         header.setFixedHeight(35)
         header.setSectionResizeMode(QHeaderView.Interactive)
 
+        # ★ 新增：固定勾选列，关闭尾部拉伸
+        header.setSectionResizeMode(COL_CHK, QHeaderView.Fixed)
+        header.setStretchLastSection(False)
+
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.table.verticalHeader().setFixedWidth(35)
+
+        # ★ 公共骨架 + transparent（FilterHeaderView 的 fillRect 负责画灰底/筛选橙）
+        self.table.setStyleSheet(
+            TABLE_BASE
+            + TABLE_HEADER_BASE
+            + "QHeaderView::section:horizontal { background: transparent; }"
+        )
 
         self.table.setColumnWidth(COL_CHK, 40)
         self.table.setColumnWidth(COL_BOOK, 120)
@@ -422,48 +424,28 @@ class LinksPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
+
         self.table.setMouseTracking(True)
-        self.table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+        # ★ 使用公共同步组件替换原来的 on_selection_changed
+        self.check_sync = SelectionCheckSync(self.table, proxy_model=self.proxy_model)
+
+        # ★ 加回把表格放入界面的代码（之前不小心删了）
         layout.addWidget(self.table, 1)
 
-        self.table.horizontalHeader().sectionResized.connect(self._save_column_widths)
-        self._load_column_widths()
-
         self.cat_group.buttonClicked.connect(self._on_cat_clicked)
-        self._load_ui_state()
 
-        self.refresh_books()
-        self.refresh_table()
+        self.col_persister = ColumnWidthPersister(
+            view=self.table,
+            settings=self.settings,
+            key="links_col_widths",
+            exclude_cols=()
+        )
+        self.col_persister.attach()
 
-    def _save_column_widths(self):
-        if not hasattr(self, '_col_width_timer'):
-            self._col_width_timer = QTimer(self)
-            self._col_width_timer.setSingleShot(True)
-            self._col_width_timer.timeout.connect(self._do_save_column_widths)
-        self._col_width_timer.start(400)
-
-    def _do_save_column_widths(self):
-        header = self.table.horizontalHeader()
-        widths = {}
-        for col in range(self.model.columnCount()):
-            if col == COL_URL: continue
-            widths[str(col)] = header.sectionSize(col)
-        self.settings.setValue("links_col_widths", json.dumps(widths))
-
-    def _load_column_widths(self):
-        raw = self.settings.value("links_col_widths", "")
-        if raw:
-            try:
-                widths = json.loads(raw)
-                header = self.table.horizontalHeader()
-                header.blockSignals(True)
-                for col_str, width in widths.items():
-                    col = int(col_str)
-                    if col != COL_URL:
-                        header.resizeSection(col, width)
-                header.blockSignals(False)
-            except Exception:
-                pass
+        # ★ 正确的初始化顺序：
+        self.refresh_books()  # 1. 加载书籍列表
+        self._load_ui_state()  # 2. 恢复上次选中的分类和筛选器
+        self.refresh_table()  # 3. 根据恢复的分类渲染表格
 
     def _load_ui_state(self):
         self._current_cat = self.settings.value("links_current_cat", "全部链接")
@@ -610,40 +592,12 @@ class LinksPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"生成 Excel 时出错：{e}")
 
-    def on_selection_changed(self, selected, deselected):
-        if self._is_updating: return
-
-        selected_rows = set(idx.row() for idx in selected.indexes())
-        deselected_rows = set(idx.row() for idx in deselected.indexes())
-        deselected_rows -= selected_rows
-
-        self._is_updating = True
-        try:
-            for r in deselected_rows:
-                src_idx = self.proxy_model.mapToSource(self.proxy_model.index(r, COL_CHK))
-                item = self.model.item(src_idx.row(), COL_CHK)
-                if item and item.data(Qt.UserRole) is not None:
-                    if item.checkState() != Qt.Unchecked:
-                        item.setCheckState(Qt.Unchecked)
-
-            for r in selected_rows:
-                src_idx = self.proxy_model.mapToSource(self.proxy_model.index(r, COL_CHK))
-                item = self.model.item(src_idx.row(), COL_CHK)
-                if item and item.data(Qt.UserRole) is not None:
-                    if item.checkState() != Qt.Checked:
-                        item.setCheckState(Qt.Checked)
-        finally:
-            self._is_updating = False
-
-        self.table.horizontalHeader().viewport().update()
-
     def send_to_complaints(self):
         target_rows = set()
         for row in range(self.model.rowCount()):
             chk_item = self.model.item(row, COL_CHK)
             if chk_item and chk_item.checkState() == Qt.Checked:
                 target_rows.add(row)
-
         for proxy_idx in self.table.selectionModel().selectedRows():
             src_idx = self.proxy_model.mapToSource(proxy_idx)
             if src_idx.isValid():
@@ -653,73 +607,26 @@ class LinksPage(QWidget):
             QMessageBox.warning(self, "提示", "请先勾选或选中需要投诉的条目！")
             return
 
-        other_rows = []
-        valid_rows = []
-        for r in target_rows:
-            cat = self.model.item(r, COL_CAT).text().strip()
-            code_info = CAT_TO_CODE_MAP.get(cat)
-            if not code_info or code_info.get("platform") == PLATFORM_OTHER:
-                other_rows.append(r)
-            else:
-                valid_rows.append(r)
+        # ★ 核心：直接交给 Service 去校验和打包
+        batches, error_report = prepare_complaints_data(self.model, self.book_list)
 
-        if not valid_rows:
-            QMessageBox.warning(
-                self, "提示",
-                "当前勾选的数据都属于【其他 / 暂未开通】分类，目前不支持自动投诉。"
-            )
-            return
+        # ★ 统一拦截：如果有任何错误，直接把错误报告扔给用户
+        if error_report:
+            err_msg = "\n".join(error_report[:10])
+            if len(error_report) > 10:
+                err_msg += f"\n...（还有 {len(error_report) - 10} 条错误未展示）"
 
-        missing_rows = []
-        for r in valid_rows:
-            book = self.model.item(r, COL_BOOK).text().strip()
-            cat = self.model.item(r, COL_CAT).text().strip()
-            url = self.model.item(r, COL_URL).text().replace(" (重复资源链接)", "").strip()
-            if not book or not cat or not url:
-                missing_rows.append(str(r + 1))
-
-        if missing_rows:
-            rows_text = "、".join(missing_rows[:10])
-            if len(missing_rows) > 10:
-                rows_text += " 等"
             QMessageBox.critical(
-                self, "⛔ 拦截：必填项缺失",
-                f"检测到以下行存在必填项未填写：\n\n👉 第 {rows_text} 行\n\n"
-                f"请把红底单元格补充完整后再发起投诉！"
+                self, "⛔ 拦截：数据校验未通过",
+                f"检测到以下问题，请修正后再发起投诉：\n\n{err_msg}"
             )
             return
-
-        if other_rows:
-            other_rows_str = "、".join(str(r + 1) for r in sorted(other_rows)[:10])
-            if len(other_rows) > 10:
-                other_rows_str += " 等"
-            reply = QMessageBox.question(
-                self, "⚠️ 发现未开通平台的数据",
-                f"以下行属于【其他 / 暂未开通】分类，将自动跳过不参与本次投诉：\n\n"
-                f"👉 第 {other_rows_str} 行\n\n"
-                f"点击【Yes】继续投诉已开通平台（夸克 / UC / 迅雷 / 百度）。\n"
-                f"点击【No】返回，可手动调整勾选后再提交。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        batches, missing_books = prepare_complaints_data(self.model, self.book_list)
 
         if not batches:
-            QMessageBox.warning(self, "提示", "未能生成投诉数据，请检查勾选情况！")
+            QMessageBox.warning(self, "提示", "未能生成有效投诉数据，请检查勾选情况！")
             return
 
-        if missing_books:
-            missing_str = "、".join(missing_books)
-            QMessageBox.critical(
-                self, "⛔ 拦截：作品信息不完整",
-                f"检测到以下作品未配置【平台作品ID】或未上传【授权书PDF】或未填写【权利人】：\n\n"
-                f"👉 {missing_str}\n\n"
-                f"请先前往【📚 作品管理】页面，补充完整后再来发起投诉！\n"
-            )
-            return
-
+        # 校验通过，进入投诉页
         self.main_window.switchTo(self.main_window.complaint_page)
         self.main_window.complaint_page.load_batches(batches)
 
@@ -804,6 +711,18 @@ class LinksPage(QWidget):
 
         self.save_row_to_db(row)
 
+        # ★ 核心修复：只要数据发生改变，立刻通知代理模型全局重新过滤
+        # 这样 A 行消失后，模型会重新计算一遍 B 行，确保 B 行正确显示
+        # self.proxy_model.invalidateFilter()
+        # self._update_stats()  # 顺便更新一下右上角的统计数字
+
+        QTimer.singleShot(0, self._safe_refresh_proxy)
+
+    def _safe_refresh_proxy(self):
+        """异步安全刷新代理模型，避免在编辑单元格时同步过滤引发死锁或错乱"""
+        self.proxy_model.invalidateFilter()
+        self._update_stats()
+
     def update_row_style(self, row):
         items = [self.model.item(row, c) for c in [COL_BOOK, COL_CAT, COL_URL]]
         if not all(items): return
@@ -813,15 +732,10 @@ class LinksPage(QWidget):
 
         is_blank_new_row = all(not t for t in texts) and not db_id
 
-        bg_color = QColor("#FADBD8")
-        transparent = QColor(0, 0, 0, 0)
-
         self._is_updating = True
         for i, item in enumerate(items):
-            if not is_blank_new_row and not texts[i]:
-                item.setBackground(bg_color)
-            else:
-                item.setBackground(transparent)
+            is_missing = not is_blank_new_row and not texts[i]
+            apply_required_style(item, is_missing)  # ★ 调用统一工具函数
         self._is_updating = False
 
     def save_row_to_db(self, row):

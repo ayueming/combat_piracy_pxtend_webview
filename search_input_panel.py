@@ -607,8 +607,8 @@ class SearchInputPanel(QWidget):
         self.parsing_label.show()
         self.main_page._is_background_parsing = True
 
-        # 直接扔给后台的流水线去解析（包含排队的 Playwright 解析）
-        trigger_parse(self.main_page.current_batch_id, is_exact=False)
+        # ★ 传 None，代表解析全库所有的 PENDING
+        trigger_parse(None, is_exact=False)
 
     def update_parse_state(self, stats):
         # ... 原有代码保持不变 ...

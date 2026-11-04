@@ -12,6 +12,7 @@ CRAWL_STATUS_IGNORED      = "ignored"        # 命中黑名单 / 已拉黑
 # ★ 新增：已在 sites 或同批草稿中存在
 CRAWL_STATUS_DUPLICATE    = "duplicate"
 
+
 # 集合（导出所有状态供外部遍历使用）
 ALL_CRAWL_STATUS = (
     CRAWL_STATUS_PENDING,

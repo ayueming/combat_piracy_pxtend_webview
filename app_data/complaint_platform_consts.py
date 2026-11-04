@@ -12,6 +12,7 @@ PLATFORM_BAIDU = "baidu"
 PLATFORM_QUARK = "quark"
 PLATFORM_UC = "uc"
 PLATFORM_XUNLEI = "xunlei"
+PLATFORM_WENXIN = "wenxin"
 PLATFORM_OTHER = "other"
 
 
@@ -47,6 +48,9 @@ PLATFORM_CONFIG = {
     "迅雷投诉": [
         ("迅雷网盘", PLATFORM_XUNLEI, MODULE_NETDISK, "云盘服务", [])
     ],
+    "智能体":[
+        ("智能体", PLATFORM_WENXIN, MODULE_FORUM, "文心智能体", [])
+    ],
     "其他": [
         # ★ 纯人工分类入口，不承接自动域名匹配。
         ("其他", PLATFORM_OTHER, MODULE_OTHER, "其他", [])
@@ -55,7 +59,6 @@ PLATFORM_CONFIG = {
         # ★ module 填 MODULE_OTHER 仅为结构占位，业务判断请用 domain_matched + target_platform。
         #   以后往这里加微博/知乎/豆瓣等，module 统一填 MODULE_OTHER，不要新增 module 常量。
         ("暂未开通", PLATFORM_OTHER, MODULE_OTHER, "暂未开通", []),
-        ("智能体", PLATFORM_OTHER, MODULE_PANSITE, "文心智能体", []),
         ("爱网盘", PLATFORM_OTHER, MODULE_PANSITE, "爱网盘", [])
     ]
 }

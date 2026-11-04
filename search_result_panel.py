@@ -591,12 +591,7 @@ class SearchResultPanel(QWidget):
             conn.close()
 
     def _init_batch(self):
-        try:
-            latest = find_latest_draft_batch()
-            if latest:
-                self.current_batch_id = latest
-        except Exception:
-            pass
+        self.current_batch_id = "ALL"
         self.refresh_tables()
 
     @property
@@ -721,11 +716,7 @@ class SearchResultPanel(QWidget):
         try:
             self._load_books()
             ensure_schema()
-            if not self.current_batch_id:
-                latest = find_latest_draft_batch()
-                if latest: self.current_batch_id = latest
-
-            self._cached_tables = get_batch_tables(self.current_batch_id)
+            self._cached_tables = get_batch_tables("ALL")
 
             stats = self._cached_tables.get("stats", {})
             total_todo = stats.get("明确资源", 0) + stats.get("未知网站", 0) + stats.get("关键词未命中", 0)

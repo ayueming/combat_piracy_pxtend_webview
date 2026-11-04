@@ -86,7 +86,17 @@ def save_uploaded_image(src_path, type_name, prefix):
 
 def upsert_evidence(owner_type, owner_key, ev_type, file_path):
     conn = get_conn()
+    old_file_path = None
     try:
+        # 1. 先查出旧的文件路径
+        row = conn.execute(
+            "SELECT file_path FROM evidences WHERE owner_type=? AND owner_key=? AND ev_type=?",
+            (owner_type, owner_key, ev_type)
+        ).fetchone()
+        if row:
+            old_file_path = row[0]
+
+        # 2. 删旧插新
         conn.execute(
             "DELETE FROM evidences WHERE owner_type=? AND owner_key=? AND ev_type=?",
             (owner_type, owner_key, ev_type))
@@ -96,6 +106,10 @@ def upsert_evidence(owner_type, owner_key, ev_type, file_path):
         conn.commit()
     finally:
         conn.close()
+
+    # 3. 提交后，如果旧路径存在且和新路径不同，尝试物理删除旧文件
+    if old_file_path and old_file_path != file_path:
+        safe_delete_file(old_file_path)
 
 
 def delete_evidence_record(owner_type, owner_key, ev_type):

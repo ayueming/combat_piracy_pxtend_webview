@@ -35,7 +35,7 @@ BOOK_EVIDENCE_TYPES = {
     "site_backend": "1、作品独家发布网站后台页面-点我更新页",
     "site_backend_doc": "2、作品独家发布网站后台页面-文案管理页",
     "site_home": "3、作品独家发布平台首页",
-    "auth_pdf": "4、作品授权书",
+    "book_auth": "4、作品授权书",
 }
 
 EVIDENCE_TYPES = {**HOLDER_EVIDENCE_TYPES, **BOOK_EVIDENCE_TYPES}
@@ -70,7 +70,7 @@ class EvidenceWidget(QFrame):
         lbl_title = QLabel()
         lbl_title.setStyleSheet("font-weight: bold; color: #1F1F1F; font-size: 13px; border: none;")
 
-        if self.ev_type == "auth_pdf":
+        if self.ev_type == "book_auth":
             html_text = (f'<span style="font-weight:bold; color:#1F1F1F; font-size:13px;">{title}</span> '
                          f'<span style="color:#999; font-size:11px;">(最好带公章)</span>')
             lbl_title.setText(html_text)
@@ -488,7 +488,7 @@ class BookTab(QWidget):
         layout_g.setContentsMargins(15, 20, 15, 15)
 
         prefix = str(platform_id) if platform_id else f"book_{book_id}"
-        for i, k in enumerate(["site_backend", "site_backend_doc", "site_home", "auth_pdf"]):
+        for i, k in enumerate(["site_backend", "site_backend_doc", "site_home", "book_auth"]):
             path = records.get(k, "")
             w = EvidenceWidget(k, BOOK_EVIDENCE_TYPES[k], path, "book", str(book_id), prefix, self)
             layout_g.addWidget(w, i // 2, i % 2)
@@ -562,7 +562,7 @@ class BookTab(QWidget):
         try:
             holder_ev, book_ev = self.get_evidence_data(book_id)
             items = [(BOOK_EVIDENCE_TYPES[k], book_ev.get(k, "")) for k in
-                     ["site_backend", "site_backend_doc", "site_home", "auth_pdf"]]
+                     ["site_backend", "site_backend_doc", "site_home", "book_auth"]]
             if include_id:
                 items.append((HOLDER_EVIDENCE_TYPES["id_card_front"], holder_ev.get("id_card_front", "")))
                 items.append((HOLDER_EVIDENCE_TYPES["id_card_back"], holder_ev.get("id_card_back", "")))

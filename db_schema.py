@@ -111,7 +111,8 @@ SITES_COLUMNS_SQL = """(
     original_title      TEXT,
     parent_url          TEXT,
     parent_title        TEXT,
-    is_mobile           INTEGER DEFAULT 0
+    is_mobile           INTEGER DEFAULT 0,
+    picker_status       TEXT  -- ★ 新增这一行
 )"""
 
 
@@ -250,6 +251,7 @@ def _ensure_sites(conn, cursor):
         ("is_mobile", "INTEGER DEFAULT 0"),
         ("first_url", "TEXT"),  # ★ 新增
         ("second_url", "TEXT"),  # ★ 新增
+        ("picker_status", "TEXT"),  # ★ 新增这一行
     ]:
         _add_column_if_missing(cursor, "sites", col_name, col_type)
 
@@ -432,11 +434,22 @@ def _ensure_site_rules(conn, cursor):
     conn.commit()
 
 
+def _ensure_authors(conn, cursor):
+    cursor.execute('''CREATE TABLE IF NOT EXISTS authors
+                      (id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                       name       TEXT UNIQUE NOT NULL,
+                       phone      TEXT,
+                       id_card    TEXT UNIQUE,
+                       email      TEXT,
+                       updated_at TEXT)''')
+    conn.commit()
+
+
 # ============================================================
 # 自检
 # ============================================================
 def _self_check(conn):
-    """校验三张表的关键列齐全，只报错不抛错"""
+    """校验关键表/列齐全，只报错不抛错"""
     def missing_of(table, cols):
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         return [f"{table}.{c}" for c in cols if c not in existing]
@@ -446,10 +459,21 @@ def _self_check(conn):
     missing += missing_of("draft_links", ["parent_url", "parent_title"])
     missing += missing_of("sites", [
         "body_text", "source_site", "batch_id", "domain_matched",
-        "relevance", "relevance_hits", "original_title", "parent_url", "parent_title"
+        "relevance", "relevance_hits", "original_title", "parent_url", "parent_title",
+        "picker_status"  # ★ 加在这里
     ])
+
+    # ★ 新增：authors 表存在性 + 关键列
+    ev = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='authors'"
+    ).fetchone()
+    if not ev:
+        missing.append("authors 表不存在")
+    else:
+        missing += missing_of("authors", ["name", "phone", "id_card", "email"])
+
     if missing:
-        print(f"[DB自检] ⚠️ 缺列：{missing}")
+        print(f"[DB自检] ⚠️ 缺列/缺表：{missing}")
     else:
         print("[DB自检] ✅ 关键列齐全")
 
@@ -482,6 +506,7 @@ def ensure_schema(force=False):
             cursor = conn.cursor()
 
             _ensure_books(conn, cursor)
+            _ensure_authors(conn, cursor)
             _ensure_sites(conn, cursor)
             _ensure_draft_links(conn, cursor)
             _ensure_records(conn, cursor)
