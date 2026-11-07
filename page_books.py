@@ -7,10 +7,13 @@ from evidence_store import safe_delete_file, save_uploaded_image, upsert_evidenc
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
                                QAbstractItemView, QFileDialog, QSizePolicy, QDialog, QGroupBox,
-                               QStyledItemDelegate, QStyle)
+                               QStyledItemDelegate, QStyle,
+                               QComboBox)   # ★ 补这一项
 from PySide6.QtCore import Qt, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices, QColor, QPainter
 from db_config import get_conn
+
+from link_resolver import is_short_url
 
 # ★ 4.2：IdDelegate 泛化为 PatternCellDelegate + is_alnum_only
 from ui_components import (
@@ -49,6 +52,46 @@ from ui_styles import (
     BG_HOVER,
     BORDER_SOFT,
 )
+
+
+class AuthorComboDelegate(QStyledItemDelegate):
+    """权利人下拉：只能从作者库中选择，禁止自由输入；用户未主动改选则保留原值"""
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setEditable(False)          # ★ 关闭手动输入
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        conn = get_conn()
+        try:
+            names = [r[0] for r in conn.execute(
+                "SELECT name FROM authors ORDER BY name"
+            ).fetchall()]
+        finally:
+            conn.close()
+        combo.addItems(names)
+
+        # ★ 记录原值 + 用户是否主动改选过
+        combo._original_text = (index.data(Qt.EditRole) or "").strip()
+        combo._user_changed = False
+        # 只有用户真正点选下拉项时才置 True（程序 setCurrentIndex 不会触发 activated）
+        combo.activated.connect(lambda *_: setattr(combo, "_user_changed", True))
+        return combo
+
+    def setEditorData(self, editor, index):
+        text = (index.data(Qt.EditRole) or "").strip()
+        editor._original_text = text
+        idx = editor.findText(text) if text else -1
+        if idx >= 0:
+            editor.setCurrentIndex(idx)
+        # 旧值不在作者库：不插入临时项、也不动 editor（保持默认显示）；
+        # 用户若不主动选择，setModelData 会保留原值
+
+    def setModelData(self, editor, model, index):
+        if not getattr(editor, "_user_changed", False):
+            return  # ★ 用户没改，什么都不做，最安全
+        model.setData(index, editor.currentText().strip(), Qt.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
 
 
 class BookEvidenceCell(QWidget):
@@ -134,8 +177,14 @@ class BookEvidenceCell(QWidget):
             prefix_id = platform_id if platform_id else f"book_{db_id}"
             new_file_path = save_uploaded_image(path, "作品维权书", prefix_id)
 
-            # ★ 修改2：统一写入 evidences 表（upsert_evidence 内部会自动处理旧文件的物理删除）
+            # ① 写 evidences.auth_pdf（upsert_evidence 内部清理旧的 evidences 记录+文件）
             upsert_evidence('book', str(db_id), 'auth_pdf', new_file_path)
+
+            # ② 同步 books.evidence_path，让 page_evidence 的"预览已上传维权书"读到新文件
+            conn = get_conn()
+            conn.execute("UPDATE books SET evidence_path=? WHERE id=?", (new_file_path, db_id))
+            conn.commit()
+            conn.close()
 
             self.parent_page.refresh_table()
         except Exception as e:
@@ -163,8 +212,14 @@ class BookEvidenceCell(QWidget):
 
         old_path = self.file_path
 
-        # ★ 修改3：从 evidences 表删除记录，再尝试删除物理文件
         delete_evidence_record('book', str(db_id), 'auth_pdf')
+
+        # 清掉 books.evidence_path 引用，否则 safe_delete_file 会因"仍被引用"跳过
+        conn = get_conn()
+        conn.execute("UPDATE books SET evidence_path='' WHERE id=?", (db_id,))
+        conn.commit()
+        conn.close()
+
         safe_delete_file(old_path)
 
         self.parent_page.refresh_table()
@@ -272,13 +327,7 @@ class BooksPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title_layout = QHBoxLayout()
-        title_label = QLabel("【作品库】")
-        title_label.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {TEXT_DARK};")
-        title_layout.addWidget(title_label)
-        title_layout.addStretch()
-        layout.addLayout(title_layout)
-
+        # ★ 已删除标题布局，直接开始下方工具栏
         tool_layout = QHBoxLayout()
         tool_layout.setSpacing(10)
 
@@ -352,6 +401,7 @@ class BooksPage(QWidget):
         self.table.setItemDelegateForColumn(0, CenteredCheckBoxDelegate(self.table))
         self.table.setItemDelegateForColumn(1, PatternCellDelegate(parent=self.table))
         self.table.setItemDelegateForColumn(6, PatternCellDelegate(parent=self.table))
+        self.table.setItemDelegateForColumn(5, AuthorComboDelegate(self.table))
 
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)

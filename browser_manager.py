@@ -7,6 +7,7 @@ import atexit
 from playwright.sync_api import sync_playwright
 
 from app_paths import get_user_dir, DIR_BROWSER_PROFILE
+from app_data.browser_consts import CDP_PORT, CDP_READY_TIMEOUT
 from db_config import get_current_user
 from browser_thread import BrowserThread
 
@@ -149,7 +150,7 @@ class BrowserManager:
 
         try:
             from plugin_bridge import ensure_ready, restart_extension_browser
-            if not ensure_ready(business_name="投诉接管", timeout=8.0):
+            if not ensure_ready(business_name="投诉接管"):
                 raise RuntimeError("无法通过 plugin_bridge 启动专用浏览器")
         except ImportError:
             raise RuntimeError("未找到 plugin_bridge 模块")
@@ -163,7 +164,9 @@ class BrowserManager:
             # ↑↑↑
 
         try:
-            self._browser = self._pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            self._browser = self._pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{CDP_PORT}"
+            )
             self._browser_thread_id = threading.get_ident()  # 新增
             self._context = self._browser.contexts[0]
             self._context_thread_id = threading.get_ident()  # 新增
@@ -181,7 +184,9 @@ class BrowserManager:
             restart_extension_browser(business_name="投诉接管重试")
 
             try:
-                self._browser = self._pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                self._browser = self._pw.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{CDP_PORT}"
+                )
                 self._browser_thread_id = threading.get_ident()  # 新增
                 self._context = self._browser.contexts[0]
                 self._context_thread_id = threading.get_ident()  # 新增
@@ -196,12 +201,30 @@ class BrowserManager:
                 self._pw_thread_id = None  # 新增
                 raise
 
+    def _patch_page(self, page):
+        """★ 核心防御：给所有 Playwright 创建的页面打上防弹窗补丁"""
+        try:
+            # 1. 拦截所有 alert/confirm/prompt 弹窗，直接自动关闭
+            page.on("dialog", lambda dialog: dialog.dismiss())
+
+            # 2. 注入 JS，物理阉割网页的弹窗能力
+            page.add_init_script("""
+                window.open = function() { return null; };
+                window.alert = function() { return; };
+                window.confirm = function() { return false; };
+                window.prompt = function() { return null; };
+            """)
+        except Exception as e:
+            print(f"⚠️ [BM] 注入防弹窗脚本失败: {e}")
+
     def _safe_new_page(self):
         print(f"[BM._safe_new_page] enter thread={threading.get_ident()} "
               f"bt_tid={self._bt._tid} ctx_tid={self._context_thread_id} "
               f"⚠️线程一致={threading.get_ident() == self._context_thread_id}")
         try:
-            return self._context.new_page()
+            page = self._context.new_page()
+            self._patch_page(page)  # ★ 新增：生成后立刻打补丁
+            return page
         except Exception as e:
             err_msg = str(e)
             print(f"[BM._safe_new_page] 异常: {err_msg}")
@@ -217,14 +240,16 @@ class BrowserManager:
                 self._browser = None
                 self._context = None
                 self._pw = None
-                self._pw_thread_id = None  # 新增
-                self._browser_thread_id = None  # 新增
-                self._context_thread_id = None  # 新增
+                self._pw_thread_id = None
+                self._browser_thread_id = None
+                self._context_thread_id = None
                 self._picker_injected = False
                 self._ensure_started_impl(minimized=False)
-                return self._context.new_page()
-            raise
 
+                page = self._context.new_page()
+                self._patch_page(page)  # ★ 新增：重连后也打补丁
+                return page
+            raise
 
     def _new_page_impl(self, url=None, force_new=False):
         self._ensure_started_impl(minimized=False)
@@ -241,6 +266,8 @@ class BrowserManager:
 
         if page is None:
             page = self._safe_new_page()
+        else:
+            self._patch_page(page)  # ★ 新增：复用的旧页面也要打补丁
 
         self._force_activate(page)
         if url:

@@ -520,6 +520,7 @@ class SpiderSourceTable(QTableWidget):
 class WebPreviewDialog(QDialog):
     def __init__(self, parent, preview_url, book_name, category, is_mobile, books):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setWindowTitle(f"网页预览 - {preview_url}")
         self.resize(1000, 800)
 
@@ -646,8 +647,12 @@ class WebPreviewDialog(QDialog):
             pass
 
         if getattr(self, "picker", None):
-            self.picker.release_lock()  # 仅释放锁
-            self.picker = None
+            try:
+                self.picker.destroy_picker()
+            except Exception:
+                pass
+            self.picker.release_lock()
+            # ★ 不要 self.picker = None
 
         event.accept()
 

@@ -1,10 +1,27 @@
 # link_resolver.py
 import os
+import re
 import time
 import random
 import urllib.request
 
+from app_data.crawl_consts import SHORT_URL_PATTERNS, INTERMEDIATE_URL_PATTERNS
 from rate_limiter import global_limiter  # ★ 引入全局节拍器
+
+
+def is_short_url(url) -> bool:
+    """命中短链白名单即返回 True（百度短链 / 百度移动端 / 微博中转）"""
+    if not url:
+        return False
+    return any(re.search(p, url) for p in SHORT_URL_PATTERNS)
+
+
+def is_intermediate_url(url) -> bool:
+    """命中中转页白名单即返回 True（如微博 visitor 中转页）。
+    中转页不是终点：它是 200 + JS 跳转，urllib 无法继续，需要 Playwright 执行 JS。"""
+    if not url:
+        return False
+    return any(re.search(p, url) for p in INTERMEDIATE_URL_PATTERNS)
 
 
 class LinkResolver:
@@ -12,12 +29,14 @@ class LinkResolver:
         self.bm = browser_manager
 
     def _is_short_url(self, url):
-        if not url: return False
-        if "baidu.com/link?url=" in url:
-            return True
-        if "m.baidu.com/from=0" in url:
-            return True
-        return False
+        return is_short_url(url)
+
+    def _is_intermediate_url(self, url):
+        return is_intermediate_url(url)
+
+    def _is_unresolved(self, url):
+        """URL 仍未解析完成：是短链，或停在中转页"""
+        return is_short_url(url) or is_intermediate_url(url)
 
     def resolve_single(self, url, is_mobile=0):
         if not self._is_short_url(url):
@@ -35,7 +54,8 @@ class LinkResolver:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=5) as response:
                 real_url = response.geturl()
-                if real_url and not self._is_short_url(real_url):
+                # ★ 新增：停在中转页（如 visitor）也算未完成，交给 Playwright
+                if real_url and not self._is_unresolved(real_url):
                     return real_url
         except Exception:
             pass
@@ -60,12 +80,12 @@ class LinkResolver:
 
                     page = context.new_page()
 
-                    # ★ 一阶段核心：等待 URL 发生变化
+                    # ★ 一阶段核心：等待 URL 发生变化（既不是短链，也不是中转页）
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=8000)
-                        # 最长等 5 秒，只要不再是百度短链，立刻打断等待
+                        # 最长等 5 秒，一旦离开短链+中转页，立刻打断等待
                         page.wait_for_url(
-                            lambda u: "baidu.com/link?url=" not in u and "m.baidu.com/from=0" not in u,
+                            lambda u: not self._is_unresolved(u),
                             timeout=5000
                         )
                         # 成功跳转后，拟人停留 800~1500 ms
@@ -89,7 +109,8 @@ class LinkResolver:
 
             try:
                 real_url = self.bm.run_in_browser_thread(_do_browser_resolve)
-                if real_url and not self._is_short_url(real_url):
+                # ★ 新增：Playwright 结果同样要排除中转页
+                if real_url and not self._is_unresolved(real_url):
                     return real_url
             except Exception as e:
                 print(f"⚠️ 浏览器排队解析失败: {e}")

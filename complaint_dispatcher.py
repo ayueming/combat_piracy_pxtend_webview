@@ -10,12 +10,13 @@ from auto_complaint_uc import run_auto_complaint_uc
 from auto_complaint_baidu import run_auto_complaint_baidu
 from auto_complaint_xunlei import run_auto_complaint_xunlei
 from auto_complaint_wenxin import run_auto_complaint_wenxin
+from auto_complaint_weibo import run_auto_complaint_weibo
 
 from browser_manager import BrowserManager
 
 # ★ 平台代号常量
 from app_data import (
-    PLATFORM_BAIDU, PLATFORM_QUARK, PLATFORM_UC, PLATFORM_XUNLEI, PLATFORM_WENXIN, PLATFORM_OTHER,
+    PLATFORM_BAIDU, PLATFORM_QUARK, PLATFORM_UC, PLATFORM_XUNLEI, PLATFORM_WENXIN, PLATFORM_WEIBO, PLATFORM_OTHER,
     PLATFORM_EXECUTION_ORDER,
 )
 
@@ -30,6 +31,7 @@ PLATFORM_ROUTER = {
     PLATFORM_BAIDU: run_auto_complaint_baidu,
     PLATFORM_XUNLEI: run_auto_complaint_xunlei,
     PLATFORM_WENXIN: run_auto_complaint_wenxin,
+    PLATFORM_WEIBO: run_auto_complaint_weibo,
 }
 
 

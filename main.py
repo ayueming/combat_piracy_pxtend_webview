@@ -21,8 +21,7 @@ from qfluentwidgets import FluentWindow, NavigationItemPosition, FluentIcon as F
 from ws_server import start_ws_server, ws_signals
 
 # 导入你的页面模块
-from page_author import AuthorPage
-from page_books import BooksPage
+from page_base_info import BaseInfoPage
 from page_links import LinksPage
 from page_search import SearchConsolePage
 from page_spider import SpiderPage
@@ -35,7 +34,7 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "3.5.2"
+VERSION = "V3.6.2"
 
 
 # ==========================================
@@ -83,7 +82,7 @@ class MainApp(FluentWindow):
                     /* 垂直滚动条 */
                     QScrollBar:vertical {
                         background: transparent;
-                        width: 10px;       /* 滚动条宽度 */
+                        width: 5px;       /* 滚动条宽度 */
                         margin: 0px;
                     }
                     QScrollBar::handle:vertical {
@@ -104,7 +103,7 @@ class MainApp(FluentWindow):
                     /* 水平滚动条 */
                     QScrollBar:horizontal {
                         background: transparent;
-                        height: 10px;
+                        height: 5px;
                         margin: 0px;
                     }
                     QScrollBar::handle:horizontal {
@@ -141,11 +140,8 @@ class MainApp(FluentWindow):
             self.resize(1400, 900)
 
         # ===== 1. 实例化所有页面 =====
-        self.author_page = AuthorPage(self)  # ★ 新增
-        self.author_page.setObjectName("authorPage")
-
-        self.books_page = BooksPage(self)
-        self.books_page.setObjectName("booksPage")
+        self.base_info_page = BaseInfoPage(self)
+        self.base_info_page.setObjectName("baseInfoPage")
 
         self.links_page = LinksPage(self)
         self.links_page.setObjectName("linksPage")
@@ -178,9 +174,14 @@ class MainApp(FluentWindow):
                 """)
 
         pages = [
-            self.author_page, self.books_page, self.links_page, self.search_page,
-            self.spider_page, self.complaint_page, self.platforms_page,
-            self.evidence_page, self.profile_page
+            self.base_info_page,
+            self.links_page,
+            self.search_page,
+            self.spider_page,
+            self.complaint_page,
+            self.platforms_page,
+            self.evidence_page,
+            self.profile_page
         ]
         for page in pages:
             page.setStyleSheet("background-color: white;")
@@ -236,8 +237,7 @@ class MainApp(FluentWindow):
             pass
 
         # 添加页面到导航栏
-        self.addSubInterface(self.books_page, FIF.LIBRARY, "作品管理")
-        self.addSubInterface(self.author_page, FIF.PEOPLE, "作者管理")
+        self.addSubInterface(self.base_info_page, FIF.LIBRARY, "作品管理")
         self.addSubInterface(self.links_page, FIF.PENCIL_INK, "链接管理")
         self.addSubInterface(self.search_page, FIF.GLOBE, "检索管理")
         self.addSubInterface(self.spider_page, FIF.LINK, "抓取管理")
@@ -281,8 +281,8 @@ class MainApp(FluentWindow):
 
         if name == "linksPage":
             self.links_page.refresh_table()
-        elif name == "authorPage":
-            self.author_page.refresh_table()
+        elif name == "baseInfoPage":
+            self.base_info_page.refresh_table()
         elif name == "searchPage":
             self.search_page.load_books()
             if hasattr(self.search_page, 'result_panel'):

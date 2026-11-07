@@ -12,6 +12,7 @@ from db_config import get_conn
 # ★ 权限管理
 from license_manager import license_mgr
 # ★ 统一按钮样式
+from ui_components import GreenTabWidget
 from ui_styles import BTN_PRIMARY, BTN_DANGER, BTN_BLUE, BTN_ORANGE
 
 # ★ 证据存储 / 报告生成（不依赖 Qt）
@@ -296,9 +297,8 @@ class HolderTab(QWidget):
         self.holder_combo.clear()
 
         conn = get_conn()
-        holders = [r[0] for r in conn.execute(
-            "SELECT DISTINCT rights_holder FROM books "
-            "WHERE rights_holder IS NOT NULL AND rights_holder != '' ORDER BY rights_holder"
+        author_names = [r[0] for r in conn.execute(
+            "SELECT name FROM authors WHERE name IS NOT NULL AND name != '' ORDER BY name"
         ).fetchall()]
         has_default = conn.execute(
             "SELECT 1 FROM evidences WHERE owner_type='holder' AND owner_key=? LIMIT 1",
@@ -306,12 +306,12 @@ class HolderTab(QWidget):
         ).fetchone()
         conn.close()
 
-        for h in holders:
+        for h in author_names:
             self.holder_combo.addItem(h, h)
         if has_default:
             self.holder_combo.addItem(UNASSIGNED_HOLDER_LABEL, UNASSIGNED_HOLDER_KEY)
         if self.holder_combo.count() == 0:
-            self.holder_combo.addItem("（暂无权利人，请先在【作品管理】填写）", "")
+            self.holder_combo.addItem("（暂无作者，请先在【作者信息】新增）", "")
 
         if current:
             idx = self.holder_combo.findData(current)
@@ -527,11 +527,20 @@ class BookTab(QWidget):
         if not book_id:
             QMessageBox.warning(self, "提示", "请先选择一本具体的作品！")
             return
+
         conn = get_conn()
+        ev_row = conn.execute(
+            "SELECT file_path FROM evidences WHERE owner_type='book' AND owner_key=? AND ev_type='auth_pdf'",
+            (str(book_id),)
+        ).fetchone()
         res = conn.execute("SELECT evidence_path FROM books WHERE id=?", (book_id,)).fetchone()
         conn.close()
 
-        path = resolve_evidence_path(res[0]) if res and res[0] else ""
+        path = ""
+        if ev_row and ev_row[0]:
+            path = resolve_evidence_path(ev_row[0])
+        if not (path and os.path.exists(path)) and res and res[0]:
+            path = resolve_evidence_path(res[0])
 
         if path and os.path.exists(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
@@ -583,11 +592,19 @@ class BookTab(QWidget):
             QMessageBox.warning(self, "提示", "请先选择一本具体的作品！")
             return
 
+        # 旧路径：优先取 evidences.auth_pdf（权威来源），回退 books.evidence_path（历史数据）
         conn = get_conn()
         res = conn.execute("SELECT platform_id, evidence_path FROM books WHERE id=?", (book_id,)).fetchone()
+        ev_row = conn.execute(
+            "SELECT file_path FROM evidences WHERE owner_type='book' AND owner_key=? AND ev_type='auth_pdf'",
+            (str(book_id),)
+        ).fetchone()
         conn.close()
+
         platform_id = res[0] if res else ""
-        old_evidence_path = resolve_evidence_path(res[1]) if res and res[1] else ""
+        old_from_books = resolve_evidence_path(res[1]) if res and res[1] else ""
+        old_from_ev = resolve_evidence_path(ev_row[0]) if ev_row and ev_row[0] else ""
+        old_evidence_path = old_from_ev or old_from_books
 
         if old_evidence_path and os.path.exists(old_evidence_path):
             reply = QMessageBox.question(
@@ -610,20 +627,28 @@ class BookTab(QWidget):
 
         try:
             holder_ev, book_ev = self.get_evidence_data(book_id)
+            # 素材：作品授权书是 book_auth（auth_pdf 是产物，不能作为素材）
             items = [(BOOK_EVIDENCE_TYPES[k], book_ev.get(k, "")) for k in
-                     ["site_backend", "site_backend_doc", "site_home", "auth_pdf"]]
+                     ["site_backend", "site_backend_doc", "site_home", "book_auth"]]
             if include_id:
                 items.append((HOLDER_EVIDENCE_TYPES["id_card_front"], holder_ev.get("id_card_front", "")))
                 items.append((HOLDER_EVIDENCE_TYPES["id_card_back"], holder_ev.get("id_card_back", "")))
 
             build_pdf(items, new_file_path)
 
+            # ① 产物写入 evidences.auth_pdf（page_books 维权书列读这里）
+            upsert_evidence("book", str(book_id), "auth_pdf", new_file_path)
+
+            # ② 同步 books.evidence_path（page_evidence 历史逻辑兼容）
             conn = get_conn()
             conn.execute("UPDATE books SET evidence_path=? WHERE id=?", (new_file_path, book_id))
             conn.commit()
             conn.close()
 
-            safe_delete_file(old_evidence_path)
+            # ③ 清理旧文件：两条引用都已指向新文件，safe_delete_file 才能删掉
+            for old in {old_from_ev, old_from_books}:
+                if old and os.path.abspath(old) != os.path.abspath(new_file_path):
+                    safe_delete_file(old)
 
             QMessageBox.information(self, "保存成功", "PDF 维权书已自动合并并保存至作品库！")
             self.load_materials()
@@ -647,17 +672,8 @@ class EvidencePage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(0)
 
-        self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #DCDCDC; background: #FFFFFF; top: -1px; }
-            QTabBar::tab { background: #F5F5F5; color: #666666; padding: 8px 24px;
-                           border: 1px solid #DCDCDC; border-bottom: none;
-                           border-top-left-radius: 6px; border-top-right-radius: 6px;
-                           margin-right: 2px; }
-            QTabBar::tab:hover { background: #EBEBEB; }
-            QTabBar::tab:selected { background: #FFFFFF; color: #1F1F1F; font-weight: bold;
-                                    border-bottom: 1px solid #FFFFFF; }
-        """)
+        self.tabs = GreenTabWidget()
+
         layout.addWidget(self.tabs)
 
         self.holder_tab = HolderTab(self)

@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from app_paths import APP_DIR, get_session_path, get_user_dir, FILE_AUTH
 from db_config import get_current_user
 
+from ui_components import GreenTabWidget
 # ★ 统一引入样式
 from ui_styles import (
     BTN_DANGER,
@@ -42,9 +43,7 @@ class ProfilePage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(0)
 
-        self.tabs = QTabWidget()
-        # ★ 直接使用全局统一的 TabWidget 样式
-        self.tabs.setStyleSheet(TAB_WIDGET)
+        self.tabs = GreenTabWidget()
 
         self.tabs.addTab(self._create_account_tab(), "个人中心")
         self.tabs.addTab(self._create_help_tab(), "使用帮助")

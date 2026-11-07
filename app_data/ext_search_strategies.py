@@ -137,6 +137,35 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": []
         }
     },
+    "微博搜索": {
+        "mode": "click",
+        "scanner": "generic",
+        "base_url": "https:",
+        "resultSelector": "div[action-type='feed_list_item'][mid]",
+        "titleSelector": ".info a.name",
+        "bodySelector": "p[node-type='feed_list_content']",
+        "sourceSelector": ".from > a:first-child",   # 取时间
+        "nextBtnSelector": ".m-page2 a.next:not(.disabled)",
+        "urlExtract": {
+            "rules": [
+                {"selector": ".from > a:first-child", "attr": "href"},
+            ],
+            "blacklist_patterns": [
+                "javascript:",
+                "weibo.com/u/",
+                "weibo.com/at/",
+                "weibo.com/weibo?q=",
+                "s.weibo.com/weibo?q=",
+                "huati.weibo.com/k/",
+                "passport.weibo",
+                "login.sina",
+            ],
+        },
+        "detailExtract": {
+            "rules": [],
+            "blacklist_patterns": [],
+        },
+    },
 }
 
 

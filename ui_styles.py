@@ -384,3 +384,27 @@ LIST_BASE = f"""
         background-color: {BG_HOVER}; color: {DARK_BG}; font-weight: bold; border-left: 3px solid {DARK_BG};
     }}
 """
+
+
+# ================= 现代绿色下划线 TabWidget =================
+TAB_MODERN_GREEN = f"""
+    QTabWidget::pane {{
+        border: none;
+        background-color: {BG_WHITE};
+    }}
+    QTabBar::tab {{
+        padding: 8px 24px;
+        font-size: 14px;
+        font-weight: bold;
+        color: {TEXT_GRAY};
+        background: transparent;
+        border-bottom: 2px solid transparent;
+    }}
+    QTabBar::tab:hover {{
+        color: {PRIMARY_GREEN}; /* 鼠标悬停时文字变绿 */
+    }}
+    QTabBar::tab:selected {{
+        color: {PRIMARY_GREEN}; /* 选中时文字变绿 */
+        border-bottom: 2px solid {PRIMARY_GREEN}; /* 选中时下划线变绿 */
+    }}
+"""

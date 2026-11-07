@@ -19,6 +19,8 @@ except ImportError:
 
 from PySide6.QtCore import QObject, Signal
 
+from app_data.browser_consts import CDP_PORT, CDP_READY_TIMEOUT
+
 
 class PluginBridgeSignals(QObject):
     plugin_timeout = Signal(str)
@@ -119,15 +121,15 @@ def _force_kill_browser_by_profile(profile_dir):
         return
     target_profile = profile_dir.lower()
     killed = False
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+    for proc in psutil.process_iter(['pid', 'name']):
         try:
             name = proc.info.get('name', '').lower()
             if 'msedge' in name or 'chrome' in name:
-                cmdline = proc.info.get('cmdline')
+                cmdline = proc.cmdline()                      # ★ 只在 name 命中后才读 cmdline
                 if cmdline and target_profile in " ".join(cmdline).lower():
                     proc.kill()
                     killed = True
-        except Exception:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     if killed:
         print("[Bridge] 发现残留的旧浏览器进程，已强制物理超度！")
@@ -181,7 +183,7 @@ def _build_browser_cmd(exe, wakeup_url, profile_dir):
     cmd = [
         exe,
         f"--user-data-dir={profile_dir}",
-        "--remote-debugging-port=9222",
+        f"--remote-debugging-port={CDP_PORT}",
         "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
@@ -233,7 +235,7 @@ def get_browser_path():
     return None
 
 
-def ensure_ready(business_name="业务", timeout=8.0):
+def ensure_ready(business_name="业务", timeout=CDP_READY_TIMEOUT):
     if bridge.is_connected():
         return True
 
@@ -277,7 +279,7 @@ def ensure_ready(business_name="业务", timeout=8.0):
             if not need_launch:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(1.0)
-                if s.connect_ex(("127.0.0.1", 9222)) != 0:
+                if s.connect_ex(("127.0.0.1", CDP_PORT)) != 0:
                     print("[Bridge] 检测到现存浏览器未开启调试端口，准备重启以支持 CDP...")
                     _browser_proc = None
                     _browser_proc_user_id = None
@@ -314,7 +316,7 @@ def ensure_ready(business_name="业务", timeout=8.0):
         _ready_lock.release()
 
 
-def restart_extension_browser(business_name="调试重启", timeout=8.0):
+def restart_extension_browser(business_name="调试重启", timeout=CDP_READY_TIMEOUT):
     global _browser_proc, _browser_proc_user_id
     with _browser_lock:
         if _browser_proc and _browser_proc.poll() is None:

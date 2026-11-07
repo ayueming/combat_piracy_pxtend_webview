@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QHeaderView, QStyleOptionButton, QApplication,
                                QStyle, QStyledItemDelegate, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel,
                                QLineEdit, QComboBox, QSizePolicy, QStylePainter,
-                               QStyleOptionComboBox)
+                               QStyleOptionComboBox, QTabWidget)
 from PySide6.QtCore import (Qt, QSortFilterProxyModel, QPoint, QRect, QEvent,
                             QItemSelection, QItemSelectionModel, QModelIndex, Signal,
                             QTimer)
@@ -23,7 +23,8 @@ from ui_styles import (
     CELL_INVALID_FG,
     CELL_ERROR_SELECTED_BG,
     HEADER_BG_COLOR,
-    BORDER_LIGHT,             # ★ 新增
+    BORDER_LIGHT,
+    TAB_MODERN_GREEN,
 )
 
 # ================= 统一默认样式常量（可被子页面传参覆盖） =================
@@ -38,6 +39,15 @@ HEADER_TRIANGLE_COLOR = "#666666"
 HEADER_TRIANGLE_ACTIVE_COLOR = DANGER_RED
 
 ROW_HOVER_BG = BG_HOVER
+
+# 2. 新增绿色 Tab 组件类
+class GreenTabWidget(QTabWidget):
+    """全软件统一的绿色下划线 Tab 切换组件"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 自动应用我们在 ui_styles 里定义的样式
+        self.setStyleSheet(TAB_MODERN_GREEN)
+        # 如果你想让字体更大一点或者加个动画，也可以在这里加
 
 
 # ================= 统一勾选框绘制工具 =================

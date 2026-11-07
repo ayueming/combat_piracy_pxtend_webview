@@ -13,6 +13,7 @@ class BaseFocusWindow(QWidget):
     def __init__(self, main_page, workbench_widget, preview_url="",
                  title="专注预览 (按 Esc 退出)", is_mobile=0):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose, True)  # ★ 让 close 走 deleteLater
         self.main_page = main_page
         self.workbench_widget = workbench_widget
         self.preview_url = preview_url
@@ -135,8 +136,12 @@ class BaseFocusWindow(QWidget):
         self._closed_handled = True
 
         if getattr(self, "picker", None):
-            self.picker.release_lock()   # 仅释放锁，不要在这里销毁 web_view
-            self.picker = None
+            try:
+                self.picker.destroy_picker()  # ★ 真正 stop + about:blank
+            except Exception:
+                pass
+            self.picker.release_lock()
+            # ★ 不要 self.picker = None，让 WA_DeleteOnClose 统一销毁
 
         if self.workbench_widget is not None:
             self.workbench_widget.setParent(None)

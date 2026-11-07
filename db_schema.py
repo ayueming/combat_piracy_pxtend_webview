@@ -112,6 +112,8 @@ SITES_COLUMNS_SQL = """(
     parent_url          TEXT,
     parent_title        TEXT,
     is_mobile           INTEGER DEFAULT 0,
+    first_url           TEXT,          -- ★ 补
+    second_url          TEXT,          -- ★ 补
     picker_status       TEXT  -- ★ 新增这一行
 )"""
 
@@ -142,6 +144,62 @@ def _add_column_if_missing(cursor, table, col_name, col_type):
     except sqlite3.OperationalError as e:
         if "duplicate column name" not in str(e).lower():
             raise
+
+
+def _parse_columns(columns_sql):
+    """从建表 SQL 的列定义块解析出 [(col_name, col_def), ...]，跳过表级约束。
+
+    以 *COLUMNS_SQL 为唯一事实来源，新增列只需改建表常量。
+    """
+    body = columns_sql.strip()
+    if body.startswith("(") and body.endswith(")"):
+        body = body[1:-1]
+    cols = []
+    for raw in body.splitlines():
+        # 去掉行内 -- 注释、行尾逗号
+        line = re.sub(r"--.*$", "", raw).strip().rstrip(",").strip()
+        if not line:
+            continue
+        # 跳过表级约束
+        if line.upper().startswith(("UNIQUE", "PRIMARY KEY", "FOREIGN KEY", "CHECK", "CONSTRAINT")):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        col_name = parts[0].strip('"`[]')
+        cols.append((col_name, parts[1].strip()))
+    return cols
+
+
+def _alter_safe_col_def(col_def):
+    """清洗列定义，去掉 ALTER TABLE ADD COLUMN 不支持的约束。"""
+    d = re.sub(r"\bPRIMARY\s+KEY\b", "", col_def, flags=re.I)
+    d = re.sub(r"\bAUTOINCREMENT\b", "", d, flags=re.I)
+    d = re.sub(r"\bUNIQUE\b", "", d, flags=re.I)
+    d = re.sub(r"\s+", " ", d).strip()
+    # NOT NULL 无 DEFAULT 时，ALTER 会失败，降级为可空
+    if re.search(r"\bNOT\s+NULL\b", d, flags=re.I) and not re.search(r"\bDEFAULT\b", d, flags=re.I):
+        d = re.sub(r"\bNOT\s+NULL\b", "", d, flags=re.I)
+        d = re.sub(r"\s+", " ", d).strip()
+    return d
+
+
+def _sync_table_columns(cursor, table, columns_sql):
+    """以建表 SQL 为准，自动补齐老库缺失的列（幂等）。"""
+    existing = {r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+    added = []
+    for col_name, col_def in _parse_columns(columns_sql):
+        if col_name in existing:
+            continue
+        safe_def = _alter_safe_col_def(col_def)
+        try:
+            cursor.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {safe_def}')
+            added.append(col_name)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+    if added:
+        print(f"[DB迁移] {table} 自动补列：{added}")
 
 
 def _books_has_alnum_check(cursor):
@@ -232,8 +290,7 @@ def _migrate_books_add_check(conn, cursor):
 # ============================================================
 def _ensure_books(conn, cursor):
     cursor.execute(f"CREATE TABLE IF NOT EXISTS books {BOOKS_COLUMNS_SQL}")
-    for col_name, col_type in [("evidence_path", "TEXT"), ("rights_holder", "TEXT"), ("baidu_id", "TEXT")]:
-        _add_column_if_missing(cursor, "books", col_name, col_type)
+    _sync_table_columns(cursor, "books", BOOKS_COLUMNS_SQL)
     conn.commit()
     if not _books_has_alnum_check(cursor):
         _migrate_books_add_check(conn, cursor)
@@ -241,35 +298,16 @@ def _ensure_books(conn, cursor):
 
 def _ensure_sites(conn, cursor):
     cursor.execute(f"CREATE TABLE IF NOT EXISTS sites {SITES_COLUMNS_SQL}")
-    for col_name, col_type in [
-        ("body_text", "TEXT"), ("source_site", "TEXT"), ("batch_id", "TEXT"),
-        ("domain_matched", "INTEGER DEFAULT 0"), ("relevance", "REAL DEFAULT 0"),
-        ("relevance_hits", "TEXT"), ("original_title", "TEXT"),
-        ("parent_url", "TEXT"), ("parent_title", "TEXT"),
-        ("complaint_time", "TEXT"), ("resource_status", "TEXT"), ("match_status", "TEXT DEFAULT ''"),
-        ("target_platform", "TEXT DEFAULT ''"),
-        ("is_mobile", "INTEGER DEFAULT 0"),
-        ("first_url", "TEXT"),  # ★ 新增
-        ("second_url", "TEXT"),  # ★ 新增
-        ("picker_status", "TEXT"),  # ★ 新增这一行
-    ]:
-        _add_column_if_missing(cursor, "sites", col_name, col_type)
+    _sync_table_columns(cursor, "sites", SITES_COLUMNS_SQL)
 
-    # ★ 新增：为了 OR 查询走索引
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_first_url    ON sites(first_url)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_second_url   ON sites(second_url)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sites_feature_code ON sites(feature_code)")
     conn.commit()
 
-
 def _ensure_draft_links(conn, cursor):
     cursor.execute(f"CREATE TABLE IF NOT EXISTS draft_links {DRAFT_LINKS_COLUMNS_SQL}")
-    # 老库补齐新增列
-    _add_column_if_missing(cursor, "draft_links", "parent_url", "TEXT")
-    _add_column_if_missing(cursor, "draft_links", "parent_title", "TEXT")
-    _add_column_if_missing(cursor, "draft_links", "is_mobile", "INTEGER DEFAULT 0")
-    _add_column_if_missing(cursor, "draft_links", "first_url", "TEXT")  # ★ 新增
-    _add_column_if_missing(cursor, "draft_links", "second_url", "TEXT")  # ★ 新增
+    _sync_table_columns(cursor, "draft_links", DRAFT_LINKS_COLUMNS_SQL)
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_draft_links_batch   ON draft_links(batch_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_draft_links_status  ON draft_links(crawl_status)")
@@ -335,11 +373,32 @@ def _ensure_ignored_links(conn, cursor):
     _add_column_if_missing(cursor, "ignored_links", "title", "TEXT")
     _add_column_if_missing(cursor, "ignored_links", "first_url", "TEXT")  # ★ 新增
     _add_column_if_missing(cursor, "ignored_links", "second_url", "TEXT")  # ★ 新增
+    _add_column_if_missing(cursor, "ignored_links", "feature_code", "TEXT")
 
     # ★ 新增：为了 OR 查询走索引
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ignored_first_url  ON ignored_links(first_url)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ignored_second_url ON ignored_links(second_url)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ignored_feature_code ON ignored_links(feature_code)")
     conn.commit()
+
+    # ★ 自动补全老数据的特征值（兼容历史记录）
+    rows = cursor.execute(
+        "SELECT id, site_url, first_url, second_url FROM ignored_links WHERE feature_code IS NULL OR feature_code = ''"
+    ).fetchall()
+    if rows:
+        try:
+            from feature_extractor import extract_pure_feature
+            for r in rows:
+                # ★ 修复优先级：优先 site_url，其次 second_url，最后 first_url
+                u = r[1] or r[3] or r[2]
+                if u:
+                    code = extract_pure_feature(u)
+                    if code:
+                        cursor.execute("UPDATE ignored_links SET feature_code = ? WHERE id = ?", (code, r[0]))
+            conn.commit()
+            print(f"[DB迁移] ✅ 已为 {len(rows)} 条老黑名单记录自动补全特征值。")
+        except Exception as e:
+            print(f"[DB迁移] ⚠️ 补全黑名单特征值失败: {e}")
 
 
 def _ensure_user_signals(conn, cursor):
@@ -449,21 +508,23 @@ def _ensure_authors(conn, cursor):
 # 自检
 # ============================================================
 def _self_check(conn):
-    """校验关键表/列齐全，只报错不抛错"""
+    """校验关键表/列齐全，只报错不抛错。"""
+    def missing_of_sql(table, columns_sql):
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        return [f"{table}.{c}" for c, _ in _parse_columns(columns_sql) if c not in existing]
+
+    missing = []
+    missing += missing_of_sql("books", BOOKS_COLUMNS_SQL)
+    missing += missing_of_sql("sites", SITES_COLUMNS_SQL)
+    missing += missing_of_sql("draft_links", DRAFT_LINKS_COLUMNS_SQL)
+
+    # 内联建表的表保留手写检查
     def missing_of(table, cols):
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         return [f"{table}.{c}" for c in cols if c not in existing]
 
-    missing = []
     missing += missing_of("user_signals", ["weight"])
-    missing += missing_of("draft_links", ["parent_url", "parent_title"])
-    missing += missing_of("sites", [
-        "body_text", "source_site", "batch_id", "domain_matched",
-        "relevance", "relevance_hits", "original_title", "parent_url", "parent_title",
-        "picker_status"  # ★ 加在这里
-    ])
 
-    # ★ 新增：authors 表存在性 + 关键列
     ev = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='authors'"
     ).fetchone()

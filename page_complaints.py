@@ -5,7 +5,7 @@ import time
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QListWidget, QTableWidget, QTableWidgetItem, QHeaderView,
                                QFileDialog, QMessageBox, QSplitter, QAbstractItemView,
-                               QProgressBar, QTabWidget, QDialog, QFrame)
+                               QProgressBar, QDialog, QFrame) # ★ 移除了 QTabWidget
 from PySide6.QtCore import Qt, Signal
 from datetime import datetime
 from db_config import get_conn
@@ -35,8 +35,11 @@ from ui_styles import (
     TABLE_READONLY_ALT,
     HEADER_BASE,
     LIST_BASE,
-    TAB_WIDGET,
+    # TAB_WIDGET, # ★ 移除了旧样式
 )
+
+# ★ 引入全局 Tab 组件
+from ui_components import GreenTabWidget
 
 
 # ============================================================
@@ -195,9 +198,8 @@ class ComplaintsPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # ★ 使用 TAB_WIDGET
-        self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(TAB_WIDGET)
+        # ★ 使用封装的绿色 Tab 组件
+        self.tabs = GreenTabWidget()
         layout.addWidget(self.tabs)
 
         # ================= Tab 1: 投诉队列 =================
@@ -485,10 +487,6 @@ class ComplaintsPage(QWidget):
                 f"请检查分类是否正确，或重新从【盗文链接】页发起投诉。"
             )
             return
-
-        # if is_all and target_platform_code == PLATFORM_BAIDU:
-        #     QMessageBox.warning(self, "提示", "百度投诉需要频繁登录，无法无人值守全批运行，请使用单批填表！")
-        #     return
 
         # === ★ 拦截暂未开通的投诉方式 ===
         #   直接复用调度器的路由表判断，不在这里再维护一份平台列表

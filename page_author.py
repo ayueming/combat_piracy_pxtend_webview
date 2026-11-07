@@ -27,11 +27,17 @@ class AuthorPage(QWidget):
         layout.setSpacing(10)
 
         title_layout = QHBoxLayout()
-        title = QLabel("【作者信息】")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {TEXT_DARK};")
-        title_layout.addWidget(title)
+
+        # ★ 1. 把提示文字放在最左边
+        tip = QLabel(
+            "提示：姓名是关联键，保存后不可修改；如需改名请删除后重建。身份证号不能重复。若不需要智能体投诉功能，可以乱填，但请不要留空。")
+        tip.setStyleSheet("color: #999; font-size: 12px;")
+        title_layout.addWidget(tip)
+
+        # ★ 2. 加一个弹簧，把后面的按钮挤到右边去
         title_layout.addStretch()
 
+        # 3. 添加按钮（保持原样）
         add_btn = QPushButton("➕ 新增作者")
         add_btn.setStyleSheet(BTN_PRIMARY_OUTLINE)
         add_btn.clicked.connect(self.add_new_row)
@@ -44,13 +50,9 @@ class AuthorPage(QWidget):
 
         layout.addLayout(title_layout)
 
-        tip = QLabel("提示：姓名是关联键，保存后不可修改；如需改名请删除后重建。身份证号不能重复，可留空。")
-        tip.setStyleSheet("color: #999; font-size: 12px;")
-        layout.addWidget(tip)
-
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["姓名", "电话", "身份证号", "邮箱"])
+        self.table.setHorizontalHeaderLabels(["权利人姓名", "电话", "身份证号", "邮箱"])
         header = self.table.horizontalHeader()
         header.setFixedHeight(35)
         header.setSectionResizeMode(QHeaderView.Stretch)
@@ -186,20 +188,38 @@ class AuthorPage(QWidget):
             QMessageBox.information(self, "提示", "请先选中要删除的作者（已有记录的行）。")
             return
 
-        names = "、".join(n for _, _, n in rows)
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"确定删除以下作者？\n{names}\n\n"
-            f"注意：作品和维权材料中仍保留该姓名的关联，删除后需自行检查。",
-            QMessageBox.Yes | QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-
         conn = get_conn()
         try:
+            # ★ 先查引用，避免"确认后才发现删不了"
+            used = []
+            for _, _, name in rows:
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM books WHERE rights_holder=?", (name,)
+                ).fetchone()[0]
+                if cnt:
+                    used.append(f"{name}（{cnt} 部作品）")
+            if used:
+                QMessageBox.warning(
+                    self, "无法删除",
+                    "以下作者仍被作品引用，请先在【作品库】修改权利人：\n\n"
+                    + "\n".join(used)
+                )
+                return
+
+            names = "、".join(n for _, _, n in rows)
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定删除以下作者？\n{names}\n\n"
+                f"注意：删除后该作者在【权利人材料】页的身份证等材料将不可见"
+                f"（文件仍保留在硬盘，补录同名作者即可恢复）。",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+
             for _, db_id, _ in rows:
                 conn.execute("DELETE FROM authors WHERE id=?", (db_id,))
             conn.commit()
         finally:
             conn.close()
+
         self.refresh_table()

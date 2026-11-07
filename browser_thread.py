@@ -9,6 +9,7 @@
 import queue
 import threading
 import traceback
+import gc
 
 
 class BrowserThread:
@@ -32,9 +33,10 @@ class BrowserThread:
         self._tid = threading.get_ident()
         while True:
             item = self._q.get()
-            if item is None:  # 哨兵
+            if item is None:
                 break
             fn, args, kwargs, box = item
+            gc.disable()  # ★ 任务期间暂停自动 GC
             try:
                 box["result"] = fn(*args, **kwargs)
                 box["ok"] = True
@@ -44,6 +46,7 @@ class BrowserThread:
                 box["ok"] = False
             finally:
                 box["event"].set()
+                gc.enable()  # ★ 立刻恢复
         self._stopped = True
 
     def submit(self, fn, *args, block=True, timeout=None, **kwargs):

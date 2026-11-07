@@ -10,6 +10,7 @@ COMPLAINT_BATCH_SIZE = 200
 # 指定哪些平台需要【单条打包】（一条生成一个独立批次）
 SINGLE_ITEM_PLATFORMS = {
     "wenxin",
+    "weibo",
     # "其他需要单条的平台代号",
 }
 

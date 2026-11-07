@@ -66,6 +66,14 @@ SEARCH_TEMPLATES = {
         "is_mobile": False,
         "note": "网盘聚合搜索",
     },
+    "微博(调试中，别用）": {
+        "template": "https://s.weibo.com/realtime?q={kw}&rd=realtime&tw=realtime&Refer=weibo_realtime",
+        "mode": "direct",
+        "exact_support": "none",   # 微博双引号精确搜索不稳定，建议先 none；需要再加 quote
+        "real_platform": "微博",
+        "is_mobile": False,
+        "note": "微博综合搜索",
+    },
     # "uc搜索": {
         # "template": "https://so.m.sm.cn/s?q={kw}",
         # "mode": "direct",

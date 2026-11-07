@@ -7,8 +7,14 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushB
                                QHeaderView, QMessageBox, QButtonGroup, QAbstractItemView,
                                QFileDialog, QTableView, QDialog, QGroupBox,
                                QStyledItemDelegate, QStyle, QScrollArea, QFrame)
-from PySide6.QtCore import Qt, QSettings, QItemSelectionModel, QEvent, QTimer
-from PySide6.QtGui import QColor, QFont, QStandardItemModel, QStandardItem, QPainter
+from PySide6.QtCore import (
+    Qt, QSettings, QItemSelectionModel, QEvent, QTimer,
+    QObject, Signal, QRunnable, QThreadPool,
+)
+from PySide6.QtGui import QColor, QFont, QStandardItemModel, QStandardItem, QPainter, QBrush
+
+from link_resolver import is_short_url
+
 from db_config import get_conn
 from feature_extractor import extract_pure_feature, get_platform_category
 from data_importer import import_sites_from_file
@@ -180,6 +186,33 @@ class ImportLinksDialog(QDialog):
             QMessageBox.critical(self, "导入失败", str(e))
 
 
+class _ShortUrlResolveSignals(QObject):
+    finished = Signal(int, str, str)   # row, old_url, new_url
+    failed = Signal(int, str, str)     # row, old_url, err_msg
+
+
+class _ShortUrlResolveWorker(QRunnable):
+    def __init__(self, row, url, signals):
+        super().__init__()
+        self.row = row
+        self.url = url
+        self.signals = signals
+
+    def run(self):
+        try:
+            from browser_manager import BrowserManager
+            from link_resolver import LinkResolver
+            try:
+                bm = BrowserManager.instance()
+            except Exception:
+                bm = None
+            resolver = LinkResolver(browser_manager=bm)
+            new_url = resolver.resolve_single(self.url, 1)   # 移动端
+            self.signals.finished.emit(self.row, self.url, new_url or "")
+        except Exception as e:
+            self.signals.failed.emit(self.row, self.url, str(e))
+
+
 class LinksPage(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -197,6 +230,17 @@ class LinksPage(QWidget):
         self._is_updating = False
         self._current_cat = "全部链接"
         self.filters_by_cat = {}
+
+        # ★ 短链检测状态（必须在 setup_ui 之前，因为 setup_ui 内部会 refresh_table）
+        self._short_url_timer = QTimer(self)
+        self._short_url_timer.setSingleShot(True)
+        self._short_url_timer.setInterval(600)
+        self._short_url_timer.timeout.connect(self._flush_short_url_check)
+        self._pending_short_rows = {}  # {row: url}
+        self._short_url_resolving = set()  # {row}
+        self._declined_short_urls = set()  # 用户拒绝解析的短链（会话内）
+        self._suppress_short_url_check = False
+        self._short_url_pool = QThreadPool.globalInstance()
 
         self.setup_ui()
 
@@ -709,6 +753,9 @@ class LinksPage(QWidget):
                 item.setFont(QFont("Microsoft YaHei", 9, QFont.Normal))
             self._is_updating = False
 
+            # ★ 短链检测调度（不阻断现有流程，用原始 raw_url 判断）
+            self._maybe_schedule_short_url_check(row, raw_url)
+
         self.save_row_to_db(row)
 
         # ★ 核心修复：只要数据发生改变，立刻通知代理模型全局重新过滤
@@ -723,6 +770,119 @@ class LinksPage(QWidget):
         self.proxy_model.invalidateFilter()
         self._update_stats()
 
+    # ================= 短链检测与解析 =================
+    YELLOW_BG = QColor("#FFF3CD")
+
+    def _maybe_schedule_short_url_check(self, row, url):
+        """短链检测入口。黄色由 update_row_style 统一维护，此处只负责清残留 + 调度弹窗。"""
+        if self._suppress_short_url_check:
+            return
+        item = self.model.item(row, COL_URL)
+        if not item:
+            return
+
+        # ★ 去掉可能携带的后缀，用纯 URL 判断
+        url = (url or "").replace(" (重复资源链接)", "").strip()
+
+        if not url or not is_short_url(url):
+            # 非短链：清掉可能残留的黄色（静默，不触发 itemChanged）
+            if item.background().color() == self.YELLOW_BG:
+                self._is_updating = True
+                try:
+                    item.setBackground(QBrush())
+                finally:
+                    self._is_updating = False
+            return
+
+        # 已拒绝过的短链：不再弹窗（黄色由 update_row_style 负责贴）
+        if url in self._declined_short_urls:
+            return
+
+        self._pending_short_rows[row] = url
+        self._short_url_timer.start()
+
+    def _flush_short_url_check(self):
+        if not self._pending_short_rows:
+            return
+        # 编辑中：顺延
+        if self.table.state() == QAbstractItemView.EditingState:
+            self._short_url_timer.start()
+            return
+
+        pending = self._pending_short_rows
+        self._pending_short_rows = {}
+
+        for row, url in pending.items():
+            item = self.model.item(row, COL_URL)
+            if not item:
+                continue
+            cur = item.text().replace(" (重复资源链接)", "").strip()
+            if cur != url:
+                continue
+            if row in self._short_url_resolving:
+                continue
+
+            reply = QMessageBox.question(
+                self.window(), "短链提示",
+                f"该链接为短链，是否需要启动浏览器解析？\n\n{url}",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                self._declined_short_urls.add(url)
+                self._is_updating = True
+                try:
+                    item.setBackground(self.YELLOW_BG)
+                finally:
+                    self._is_updating = False
+                continue
+
+            self._start_short_url_resolve(row, url)
+
+    def _start_short_url_resolve(self, row, url):
+        self._short_url_resolving.add(row)
+        signals = _ShortUrlResolveSignals()
+        signals.finished.connect(self._on_short_url_resolved)
+        signals.failed.connect(self._on_short_url_resolve_failed)
+        self._short_url_pool.start(_ShortUrlResolveWorker(row, url, signals))
+
+    def _on_short_url_resolved(self, row, old_url, new_url):
+        # ★ 若解析期间 refresh_table 已清空集合，说明 row 已失效
+        if row not in self._short_url_resolving:
+            return
+        self._short_url_resolving.discard(row)
+
+        if not new_url or new_url == old_url:
+            QMessageBox.information(self.window(), "解析结果", "未能解析出更短的链接，已保留原值。")
+            return
+
+        item = self.model.item(row, COL_URL)
+        if not item:
+            return
+        cur = item.text().replace(" (重复资源链接)", "").strip()
+        if cur != old_url:
+            return  # 解析期间用户改过，不覆盖
+
+        self._declined_short_urls.discard(old_url)
+
+        # ★ 先静默清黄色，再 setText 让它单独跑一遍完整流程
+        self._suppress_short_url_check = True
+        try:
+            self._is_updating = True
+            try:
+                item.setBackground(QBrush())
+            finally:
+                self._is_updating = False
+            item.setText(new_url)   # 触发 on_item_changed，走 link 页完整流程
+        finally:
+            self._suppress_short_url_check = False
+
+        QMessageBox.information(self.window(), "解析成功", f"已替换为真实链接：\n{new_url}")
+
+    def _on_short_url_resolve_failed(self, row, old_url, err_msg):
+        if row not in self._short_url_resolving:
+            return
+        self._short_url_resolving.discard(row)
+        QMessageBox.warning(self.window(), "解析失败", f"短链解析失败：\n{err_msg}\n\n已保留原链接。")
+
     def update_row_style(self, row):
         items = [self.model.item(row, c) for c in [COL_BOOK, COL_CAT, COL_URL]]
         if not all(items): return
@@ -736,6 +896,11 @@ class LinksPage(QWidget):
         for i, item in enumerate(items):
             is_missing = not is_blank_new_row and not texts[i]
             apply_required_style(item, is_missing)  # ★ 调用统一工具函数
+
+        # ★ 已拒绝的短链覆盖黄色（在 _is_updating 内，不触发 itemChanged）
+        if texts[2] in self._declined_short_urls:
+            items[2].setBackground(self.YELLOW_BG)
+
         self._is_updating = False
 
     def save_row_to_db(self, row):
@@ -835,6 +1000,10 @@ class LinksPage(QWidget):
 
     def refresh_table(self):
         self._is_updating = True
+        # ★ refresh 后 row 序号会变，清空解析中/待弹窗集合，避免写到错误行
+        self._short_url_resolving.clear()
+        self._pending_short_rows.clear()
+
         self.model.removeRows(0, self.model.rowCount())
 
         target_cats = self.cat_map.get(self._current_cat, ["全部资源"])
@@ -909,6 +1078,7 @@ class LinksPage(QWidget):
                 QStandardItem(comp_time or ""), item_res_status, item_title,
             ])
 
+            # ★ 黄色由 update_row_style 统一判断（基于 _declined_short_urls）
             self.update_row_style(self.model.rowCount() - 1)
 
         conn.close()
@@ -972,6 +1142,7 @@ class LinksPage(QWidget):
             ]
             self.model.insertRow(insert_pos, row_items)
 
+            # ★ 黄色由 update_row_style 统一判断
             self.update_row_style(insert_pos)
             self._is_updating = True
 

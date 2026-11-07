@@ -74,12 +74,12 @@ def _resolve_url(raw_url, resolver, is_mobile=0):
         return None
 
 
-def _is_blacklisted(cursor, url, stage="first"):
-    """查询 ignored_links，OR site_url 兜底历史数据"""
+def _is_blacklisted(cursor, url, feature_code, stage="first"):
+    """查询 ignored_links，OR site_url 兜底历史数据，同时按特征值匹配"""
     col = f"{stage}_url"
     return cursor.execute(
-        f"SELECT id FROM ignored_links WHERE {col} = ? OR site_url = ?",
-        (url, url)
+        f"SELECT id FROM ignored_links WHERE {col} = ? OR site_url = ? OR (feature_code = ? AND feature_code != '')",
+        (url, url, feature_code or "")
     ).fetchone() is not None
 
 
@@ -265,8 +265,10 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
     bm = BrowserManager.instance()
     resolver = LinkResolver(bm)
 
-    processed_first_urls = set()   # 阶段 1 批内去重
-    processed_second_urls = set()  # 阶段 2 批内去重
+    processed_first_urls = set()  # 阶段 1 批内去重 (URL)
+    processed_second_urls = set()  # 阶段 2 批内去重 (URL)
+    processed_first_features = set()  # ★ 新增：阶段 1 批内去重 (特征值)
+    processed_second_features = set()  # ★ 新增：阶段 2 批内去重 (特征值)
 
     try:
         for (db_id, first_url_raw, source_platform, page_title, source_keyword,
@@ -284,11 +286,17 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
                 failed_count += 1
                 continue
 
-            if first_url in processed_first_urls:
+            # ★ 特征值提前提取
+            feature_code_1 = extract_pure_feature(first_url)
+
+            # ★ 批内去重：同时看 URL 和 特征值
+            if first_url in processed_first_urls or (feature_code_1 and feature_code_1 in processed_first_features):
                 cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
                 conn.commit()
                 continue
             processed_first_urls.add(first_url)
+            if feature_code_1:
+                processed_first_features.add(feature_code_1)
 
             if _hit_whitelist(page_title, source_site_text, first_url):
                 cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
@@ -297,14 +305,15 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
                 whitelist_skipped += 1
                 continue
 
-            if _is_blacklisted(cursor, first_url, "first"):
+            # ★ 黑名单校验传特征值
+            if _is_blacklisted(cursor, first_url, feature_code_1, "first"):
                 cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
                                (first_url, first_url, CRAWL_STATUS_IGNORED, db_id))
                 conn.commit()
                 blacklist_skipped += 1
                 continue
 
-            feature_code_1 = extract_pure_feature(first_url)
+            # 查库去重
             dup_id_1 = _find_duplicate_by_stage(cursor, first_url, "first", feature_code_1)
             if dup_id_1:
                 cursor.execute(
@@ -324,8 +333,9 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
             if not is_manual and strategy.get("detailExtract") and strategy["detailExtract"].get("rules"):
                 if second_url is None:
                     # 剥壳失败，直接标解析失败
-                    cursor.execute("UPDATE draft_links SET first_url = ?, site_url = NULL, crawl_status = ?, match_status = 'parse_failed' WHERE id = ?",
-                                   (first_url, CRAWL_STATUS_PARSE_FAILED, db_id))
+                    cursor.execute(
+                        "UPDATE draft_links SET first_url = ?, site_url = NULL, crawl_status = ?, match_status = 'parse_failed' WHERE id = ?",
+                        (first_url, CRAWL_STATUS_PARSE_FAILED, db_id))
                     conn.commit()
                     failed_count += 1
                     continue
@@ -333,22 +343,29 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
                 final_url = second_url
                 final_feature_code = extract_pure_feature(second_url)
 
-                if second_url in processed_second_urls:
+                # ★ 批内去重：同时看 URL 和 特征值
+                if second_url in processed_second_urls or (
+                        final_feature_code and final_feature_code in processed_second_features):
                     cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
                     conn.commit()
                     continue
                 processed_second_urls.add(second_url)
+                if final_feature_code:
+                    processed_second_features.add(final_feature_code)
 
                 if _hit_whitelist(page_title, source_site_text, second_url):
-                    cursor.execute("UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
-                                   (first_url, second_url, second_url, CRAWL_STATUS_WHITELIST, db_id))
+                    cursor.execute(
+                        "UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                        (first_url, second_url, second_url, CRAWL_STATUS_WHITELIST, db_id))
                     conn.commit()
                     whitelist_skipped += 1
                     continue
 
-                if _is_blacklisted(cursor, second_url, "second"):
-                    cursor.execute("UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
-                                   (first_url, second_url, second_url, CRAWL_STATUS_IGNORED, db_id))
+                # ★ 黑名单校验传特征值
+                if _is_blacklisted(cursor, second_url, final_feature_code, "second"):
+                    cursor.execute(
+                        "UPDATE draft_links SET first_url = ?, second_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                        (first_url, second_url, second_url, CRAWL_STATUS_IGNORED, db_id))
                     conn.commit()
                     blacklist_skipped += 1
                     continue
@@ -396,7 +413,8 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
 
             target_platform, domain_matched = _classify_platform(final_url, source_platform)
             if domain_matched == 0:
-                relevance_val, relevance_hits_json = _calc_relevance(page_title, body_text, source_site_text, all_signals)
+                relevance_val, relevance_hits_json = _calc_relevance(page_title, body_text, source_site_text,
+                                                                     all_signals)
             else:
                 relevance_val, relevance_hits_json = 0.0, None
             has_pan = _detect_netdisk(page_title, body_text)
@@ -472,15 +490,15 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
 
         if blacklist_ids:
             placeholders = ','.join('?' * len(blacklist_ids))
-            # ★ 增加 first_url, second_url
+            # ★ 增加查询 feature_code
             rows = cursor.execute(
-                f"SELECT id, site_url, name, first_url, second_url FROM draft_links WHERE id IN ({placeholders})",
+                f"SELECT id, site_url, name, first_url, second_url, feature_code FROM draft_links WHERE id IN ({placeholders})",
                 blacklist_ids).fetchall()
             for r in rows:
-                # ★ 增加写入
+                # ★ 写入 feature_code
                 cursor.execute(
-                    "INSERT OR IGNORE INTO ignored_links (site_url, title, add_time, first_url, second_url) VALUES (?, ?, ?, ?, ?)",
-                    (r[1], r[2], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r[3], r[4]))
+                    "INSERT OR IGNORE INTO ignored_links (site_url, title, add_time, first_url, second_url, feature_code) VALUES (?, ?, ?, ?, ?, ?)",
+                    (r[1], r[2], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r[3], r[4], r[5]))
                 cursor.execute("DELETE FROM draft_links WHERE id = ?", (r[0],))
                 black_count += 1
 

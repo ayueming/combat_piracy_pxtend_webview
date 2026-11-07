@@ -15,6 +15,23 @@ from picker_injector import build_picker_js
 from picker_js_bridge import PickerJsBridge
 
 
+class SafeWebPage(QWebEnginePage):
+    def createWindow(self, _type):
+        print("🛡️ [WebEngine] 成功拦截一个网页弹窗")
+        return None
+
+    def javaScriptAlert(self, securityOrigin, msg):
+        pass
+
+    def javaScriptConfirm(self, securityOrigin, msg):
+        return False
+
+    def javaScriptPrompt(self, securityOrigin, msg, defaultValue):
+        return (False, "")
+
+    def certificateError(self, error):
+        return True     # ★ 接受所有证书，保证盗文站可预览（业务必需）
+
 class PickerWebView(QWidget):
     picked      = Signal(dict)
     saved_page  = Signal(dict)    # ★ 与 bridge 保持一致
@@ -44,11 +61,12 @@ class PickerWebView(QWidget):
         layout.setSpacing(0)
 
         self.web_view = QWebEngineView()
+        # ★ 新增：绑定我们写的安全 Page 类
         self._setup_profile()
         layout.addWidget(self.web_view)
 
-        self.channel = QWebChannel()
-        self.bridge = PickerJsBridge(self._context_provider)
+        self.channel = QWebChannel(self)  # ★ 加 self
+        self.bridge = PickerJsBridge(self._context_provider, self)  # ★ 加 self
         self.channel.registerObject("pyBridge", self.bridge)
         self.web_view.page().setWebChannel(self.channel)
 
@@ -114,8 +132,8 @@ class PickerWebView(QWidget):
     # ---------- 内部 ----------
     def _setup_profile(self):
         self.profile = create_preview_profile(self.web_view, self._is_mobile)
-        # ★ 必须把 page 挂到 self 上保活
-        self.page = QWebEnginePage(self.profile, self.web_view)
+        # ★ 核心修改：直接把原来的 QWebEnginePage 替换为我们写的 SafeWebPage，并传入 profile
+        self.page = SafeWebPage(self.profile, self.web_view)
         self.web_view.setPage(self.page)
 
     def _on_ua_switched(self, mode):
