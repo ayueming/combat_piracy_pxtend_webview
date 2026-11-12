@@ -161,10 +161,14 @@ class DataCard(QFrame):
         self.setCursor(Qt.ArrowCursor)
         self.setFixedHeight(185)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setStyleSheet(
-            f"#DataCard {{ background-color: #FFFFFF; border: 1px solid #E5E7EB; border-left: {style['border']}; border-radius: 6px; }}"
-            f"#DataCard:hover {{ background-color: #F8FAFC; border: 1px solid #93C5FD; border-left: {style['border']}; }}"
-        )
+
+        # ★ 修改点 1：这里不要直接 setStyleSheet，而是抽离出一个方法
+        # 初始化时检查是否已经是当前预览的卡片
+        is_active = False
+        if hasattr(parent_panel.main_page, "active_preview_db_id"):
+            is_active = (parent_panel.main_page.active_preview_db_id == self.db_id)
+        self.set_highlight(is_active)
+
         self.display_url = "⏳ 等待解析真实链接..." if "baidu.com/link?url=" in self.raw_url else self.raw_url
 
         layout = QVBoxLayout(self)
@@ -340,6 +344,21 @@ class DataCard(QFrame):
             bottom_row.addWidget(lbl_cat)
 
         layout.addLayout(bottom_row)
+
+    # ★ 新增：动态切换底色
+    def set_highlight(self, is_active):
+        style = CARD_STYLES.get(self.status, CARD_STYLES["未知网站"])
+        if is_active:
+            bg = "#EFF6FF"  # 浅蓝色背景
+            border = "1px solid #3B82F6"  # 蓝色边框
+        else:
+            bg = "#FFFFFF"
+            border = "1px solid #E5E7EB"
+
+        self.setStyleSheet(
+            f"#DataCard {{ background-color: {bg}; border: {border}; border-left: {style['border']}; border-radius: 6px; }}"
+            f"#DataCard:hover {{ background-color: #F8FAFC; border: 1px solid #93C5FD; border-left: {style['border']}; }}"
+        )
 
     # ★ 新增：平滑折叠消失动画
     def smooth_disappear(self):
@@ -688,7 +707,7 @@ class SearchResultPanel(QWidget):
     def _on_new_data_inserted(self, count):
         self.refresh_tables()
 
-    def _on_parse_done(self, success):
+    def _on_parse_done(self, success, batch_id=None):
         self.refresh_tables()
         if success:
             if self.tab_bar.currentIndex() != 0:
@@ -868,20 +887,14 @@ class SearchResultPanel(QWidget):
             self.refresh_tables()
 
     def show_list_manager(self):
-        # ★ 看黑白名单的功能，被误删了，暂时不处理，
-        # 因为 page_search.py 里根本没有 ListDialog，直接在这里临时造一个，防止崩溃
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
-
-        class ListDialog(QDialog):
-            def __init__(self, parent=None):
-                super().__init__(parent)
-                self.setWindowTitle("列表管理")
-                self.resize(400, 300)
-                layout = QVBoxLayout(self)
-                layout.addWidget(QLabel("这里原本应该是 永删/白名单 列表。\n（由于原代码丢失，目前是占位提示）"))
-                btn = QPushButton("关闭")
-                btn.clicked.connect(self.accept)
-                layout.addWidget(btn)
-
-        dlg = ListDialog(self)
+        from list_manager_dialog import ListManagerDialog
+        dlg = ListManagerDialog(self)
         dlg.exec()
+
+    # ★ 新增：刷新所有卡片的高亮状态
+    def update_preview_highlight(self):
+        active_id = getattr(self.main_page, "active_preview_db_id", None)
+        # 遍历三个列表下所有的 DataCard
+        for lst in [self.list_todo, self.list_pending, self.list_archive]:
+            for card in lst.findChildren(DataCard):
+                card.set_highlight(card.db_id == active_id)

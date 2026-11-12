@@ -331,8 +331,11 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
             final_feature_code = feature_code_1
 
             if not is_manual and strategy.get("detailExtract") and strategy["detailExtract"].get("rules"):
-                if second_url is None:
-                    # 剥壳失败，直接标解析失败
+                # ★ 核心修复：调用 resolve_detail 进入详情页剥壳
+                second_url = resolver.resolve_detail(first_url, strategy, is_mobile)
+
+                # ★ 剥壳失败 = 返回 None，或返回的还是 first_url 本身（说明没真正提取到）
+                if not second_url or second_url == first_url:
                     cursor.execute(
                         "UPDATE draft_links SET first_url = ?, site_url = NULL, crawl_status = ?, match_status = 'parse_failed' WHERE id = ?",
                         (first_url, CRAWL_STATUS_PARSE_FAILED, db_id))

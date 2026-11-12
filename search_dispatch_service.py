@@ -44,7 +44,7 @@ def _handle_scan_finished(data):
     ws_signals.scan_state_changed.emit("idle")
 
 
-def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
+def dispatch_search_task(platform, keyword, max_pages, sub_kws=None, book_name="", batch_id=""):
     if not app_state.check_and_lock("searching"):
         return "busy"
     if app_state.is_busy():
@@ -60,29 +60,22 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
     real_platform = config.get("real_platform", platform)
     is_mobile = config.get("is_mobile", False)
 
-    batch_id = app_state.current_context.get("batch_id") or \
-        f"{platform}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # ★ 优先使用传入的 batch_id，如果没有则生成一个
+    real_batch_id = batch_id or f"{platform}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     task = {
         "action": "do_search",
         "task_id": _make_task_id(platform),
-        "batch_id": batch_id,
+        "batch_id": real_batch_id,
         "platform": platform,
         "real_platform": real_platform,
         "is_mobile": is_mobile,
         "keyword": keyword,
-        "book_name": app_state.current_context.get("book_name", ""),
+        "book_name": book_name,  # ★ 使用传入的 book_name
         "max_pages": max_pages,
         "url": url,
         "strategy": strategy,
     }
-
-    app_state.set_context(
-        book_name=task["book_name"],
-        keyword=task["keyword"],
-        batch_id=task["batch_id"],
-        source_platform=real_platform,
-    )
 
     ws_signals.scan_state_changed.emit("scanning")
 
@@ -107,7 +100,8 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
 
             if links:
                 new_count = 0
-                ctx = {
+                # ★ 局部 Context，绝对不污染全局
+                task_ctx = {
                     "source_platform": real_platform,
                     "is_mobile": is_mobile,
                     "keyword": task["keyword"],
@@ -118,7 +112,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
                 for link in links:
                     try:
                         _, _, is_new = save_picked_link(
-                            url=link["url"], title=link.get("title", ""), ctx=ctx,
+                            url=link["url"], title=link.get("title", ""), ctx=task_ctx,
                             body=link.get("body", ""), source_site=link.get("source_site", ""),
                             parent_url="", parent_title="", is_manual=False,
                         )
@@ -129,6 +123,8 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None):
 
                 if new_count > 0:
                     print(f"✅ [Playwright] 任务入库待处理 {new_count} 条")
+                    # ★ 补发信号：通知前端刷新草稿箱
+                    ws_signals.new_data_inserted.emit(new_count)
 
             _handle_scan_finished({
                 "task_id": task["task_id"],

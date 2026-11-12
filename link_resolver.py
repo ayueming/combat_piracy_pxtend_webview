@@ -6,6 +6,7 @@ import random
 import urllib.request
 
 from app_data.crawl_consts import SHORT_URL_PATTERNS, INTERMEDIATE_URL_PATTERNS
+from app_data.mobile_consts import DESKTOP_UA, MOBILE_UA
 from rate_limiter import global_limiter  # ★ 引入全局节拍器
 
 
@@ -43,10 +44,7 @@ class LinkResolver:
             return url
 
         # 1. 决定 urllib 的 UA
-        if is_mobile:
-            ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
-        else:
-            ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ua = MOBILE_UA if is_mobile else DESKTOP_UA
 
         # 2. urllib 极速尝试
         try:
@@ -118,6 +116,7 @@ class LinkResolver:
         return url
 
     def resolve_detail(self, detail_url, strategy, is_mobile=0):
+        print(f"🚀 [二阶段·入口] resolve_detail 被调用了: {detail_url}")
         """
         二阶段：进入详情页，根据 detailExtract 规则提取最终真实链接。
         """
@@ -130,8 +129,16 @@ class LinkResolver:
                 self.bm._ensure_started_impl()
                 global_limiter.wait()
 
+                # ===== 诊断 1 =====
+                print(f"🔍 [二阶段·诊断] detail_url = {detail_url}")
+                print(f"🔍 [二阶段·诊断] is_mobile = {is_mobile}")
+                print(f"🔍 [二阶段·诊断] strategy keys = {list(strategy.keys()) if strategy else None}")
+                detail_cfg = (strategy or {}).get("detailExtract") or {}
+                print(f"🔍 [二阶段·诊断] detailExtract = {detail_cfg}")
+                print(f"🔍 [二阶段·诊断] base_url = {(strategy or {}).get('base_url')!r}")
+
+                ua = MOBILE_UA if is_mobile else DESKTOP_UA
                 if is_mobile:
-                    ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
                     context = self.bm._browser.new_context(
                         user_agent=ua,
                         viewport={"width": 390, "height": 844},
@@ -139,47 +146,77 @@ class LinkResolver:
                         has_touch=True
                     )
                 else:
-                    context = self.bm._browser.new_context()
+                    context = self.bm._browser.new_context(user_agent=ua)
 
                 page = context.new_page()
 
                 print(f"🔍 [二阶段] 正在进入详情页: {detail_url}")
 
                 try:
-                    page.goto(detail_url, wait_until="domcontentloaded", timeout=10000)
+                    page.goto(detail_url, wait_until="domcontentloaded", timeout=15000)
+                    print(f"🔍 [二阶段·诊断] 落地 URL = {page.url}")
+                    print(f"🔍 [二阶段·诊断] 页面标题 = {page.title()}")
 
-                    # ★ 二阶段核心：智能等待特定元素出现
-                    wait_selector = strategy.get("detailExtract", {}).get("wait_selector")
+                    wait_selector = detail_cfg.get("wait_selector")
+                    print(f"🔍 [二阶段·诊断] wait_selector = {wait_selector!r}")
+
                     if wait_selector:
-                        # 最长等 5 秒，元素一出现立刻继续
-                        page.wait_for_selector(wait_selector, state="visible", timeout=5000)
+                        try:
+                            page.wait_for_selector(wait_selector, state="attached", timeout=8000)
+                            print(f"✅ [二阶段·诊断] wait_selector 命中")
+                        except Exception as we:
+                            print(f"⚠️ [二阶段·诊断] wait_selector 超时/未命中: {we}")
                     else:
-                        # 兜底：如果配置忘写了，就等 1.5 秒
                         page.wait_for_timeout(1500)
 
-                    # 动态加载 JS 扫描脚本
                     js_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_scanner_strategies.js")
                     with open(js_path, "r", encoding="utf-8") as f:
                         scanner_js = f.read()
                     page.add_script_tag(content=scanner_js)
-                    page.wait_for_timeout(200)
+                    page.wait_for_timeout(500)
 
-                    # 执行提取
+                    try:
+                        mounted = page.evaluate("typeof window.__apt_scanner_strategies !== 'undefined'")
+                        print(f"🔍 [二阶段·诊断] scanner 已挂载 = {mounted}")
+                    except Exception as e:
+                        print(f"⚠️ [二阶段·诊断] 检查 scanner 挂载失败: {e}")
+
+                    try:
+                        hit_count = page.evaluate(
+                            "(sel) => document.querySelectorAll(sel).length",
+                            wait_selector or ""
+                        ) if wait_selector else -1
+                        print(f"🔍 [二阶段·诊断] querySelectorAll('{wait_selector}') 命中数 = {hit_count}")
+                    except Exception as e:
+                        print(f"⚠️ [二阶段·诊断] querySelectorAll 执行失败: {e}")
+
                     real_url = page.evaluate(
                         "(strategy) => window.__apt_scanner_strategies.extractUrl(document, strategy.detailExtract, strategy.base_url)",
                         strategy
                     )
+                    print(f"🔍 [二阶段·诊断] extractUrl 返回 = {real_url!r}")
 
                     if real_url:
                         print(f"✅ [二阶段] 成功提取到真实链接: {real_url}")
-                        # 成功抓取后，拟人停留 800~1500 ms
                         page.wait_for_timeout(random.randint(800, 1500))
                         return real_url
+
+                    try:
+                        fallback_links = page.evaluate("""
+                            () => Array.from(document.querySelectorAll("a[href^='http']"))
+                                .filter(a => !a.href.includes("iwangpan.cc"))
+                                .slice(0, 10)
+                                .map(a => ({ cls: a.className, href: a.href }))
+                        """)
+                        print(f"🔍 [二阶段·诊断] 详情页站外链接 ({len(fallback_links or [])} 条):")
+                        for l in (fallback_links or []):
+                            print(f"    cls={l['cls']!r} href={l['href']}")
+                    except Exception as e:
+                        print(f"⚠️ [二阶段·诊断] 兜底抓站外链接失败: {e}")
 
                     return None
 
                 except Exception as wait_err:
-                    # 如果等元素超时，或者页面报错
                     print(f"⚠️ [二阶段] 页面解析或等待超时: {wait_err}")
                     return None
                 finally:
@@ -193,6 +230,7 @@ class LinkResolver:
                     context.close()
                 return None
 
+        # ★★★ 这段就是之前漏掉的，必须补回来 ★★★
         try:
             real_url = self.bm.run_in_browser_thread(_do_browser_resolve)
             return real_url

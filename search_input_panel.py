@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QRect, QSize, QPoint, Signal, QTimer
 
 from db_config import get_conn
 from app_data.search_templates import get_available_platforms
-from ws_server import current_context, dispatch_search_task, get_app_mode
+from ws_server import dispatch_search_task, get_app_mode
 from link_ingest_service import check_drafts_exist
 from parser_service import trigger_parse
 from ui_styles import BTN_PRIMARY
@@ -295,6 +295,13 @@ class SearchInputPanel(QWidget):
             self.progress_dialog.activateWindow()
 
     def _on_parse_finished(self, success, batch_id):
+        # ★ 修复：队列还有下一个任务时，弹窗已经被 [A] task_queue._on_parse_finished
+        #    通过 _execute_next → scan_state_changed("scanning") 原地切换成 searching 形态，
+        #    这里绝不能再启动隐藏定时器，否则第二次搜索期间弹窗会消失，
+        #    一直要等到第二次解析(parse_started)才会重新冒出来。
+        from search_task_queue import task_queue
+        if task_queue.is_running:
+            return
         self._hide_timer.start(120)
 
     def _reset_search_btn(self):
@@ -410,7 +417,7 @@ class SearchInputPanel(QWidget):
 
         page_layout = QHBoxLayout()
         page_layout.setContentsMargins(0, 5, 0, 5)
-        lbl_page = QLabel("自动翻页数:")
+        lbl_page = QLabel("自动翻页:")
         lbl_page.setStyleSheet("color:#4B5563; font-size: 13px;")
         lbl_page.setFixedWidth(65)
         lbl_page.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -481,8 +488,6 @@ class SearchInputPanel(QWidget):
         self.temp_sub_kws.clear()
         self.refresh_sub_kws()
 
-        current_context["book_name"] = self.book_combo.currentText()
-        current_context["keyword"] = self.main_kw_input.text()
 
     def refresh_sub_kws(self):
         # ... 原有代码保持不变 ...
@@ -554,17 +559,19 @@ class SearchInputPanel(QWidget):
 
         self.main_page.result_panel.current_batch_id = self.main_page.current_batch_id
 
-        current_context["book_name"] = self.book_combo.currentText()
-        current_context["keyword"] = self.main_kw_input.text()
-        current_context["batch_id"] = self.main_page.current_batch_id
-
         page_limit_text = self.page_limit_combo.currentText()
         max_pages = int(page_limit_text.replace("页", ""))
-
         sub_kws = list(self.selected_sub_kws)
 
         # 派发任务
-        result = dispatch_search_task(platform, main_kw, max_pages, sub_kws)
+        result = dispatch_search_task(
+            platform=platform,
+            keyword=main_kw,
+            max_pages=max_pages,
+            sub_kws=sub_kws,
+            book_name=self.book_combo.currentText(),
+            batch_id=self.main_page.current_batch_id,
+        )
         print(f"🚦 [DEBUG] 搜索派发结果: {result}")
 
         if result == "success":
@@ -611,10 +618,11 @@ class SearchInputPanel(QWidget):
         trigger_parse(None, is_exact=False)
 
     def update_parse_state(self, stats):
-        # ... 原有代码保持不变 ...
         self.parsing_label.hide()
         self.main_page._is_background_parsing = False
-        pending_count = stats.get("待解析", 0) + stats.get("解析失败", 0)
+
+        # ★ 修复：解析失败是终态，不应该算作“未解析”，只统计 PENDING 状态
+        pending_count = stats.get("待解析", 0)
 
         if pending_count > 0:
             self.parse_btn.setText(f"⚠️ {pending_count} 条未解析，点击重试")

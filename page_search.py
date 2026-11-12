@@ -1,5 +1,3 @@
-# 看到此行，不要再撤回
-
 # page_search.py
 import os
 from plugin_bridge import bridge_signals
@@ -9,7 +7,7 @@ from PySide6.QtCore import Qt
 from qfluentwidgets import SimpleCardWidget  # ★ 引入 Fluent 卡片
 
 from db_schema import ensure_schema
-from ws_server import set_app_mode, current_context
+from ws_server import set_app_mode
 from search_result_panel import SearchResultPanel, ToastLabel
 from mobile_url_utils import resolve_is_mobile
 
@@ -37,7 +35,9 @@ class SearchConsolePage(QWidget):
 
         if self.result_panel.current_batch_id:
             self.current_batch_id = self.result_panel.current_batch_id
-            current_context["batch_id"] = self.current_batch_id
+            # ★ 删除：current_context["batch_id"] = self.current_batch_id
+            #   页面级状态已由 self.current_batch_id 持有，搜索归属显式经
+            #   dispatch_search_task(book_name=..., batch_id=...) 传入，无需写全局
 
         bridge_signals.plugin_timeout.connect(self._on_plugin_timeout)
 
@@ -124,12 +124,38 @@ class SearchConsolePage(QWidget):
         is_mobile = resolve_is_mobile(is_mobile, raw_url)
         self.active_preview_db_id = db_id
 
+        # ★ 从 db_id 反查 batch_id（显式上下文的关键来源）
+        batch_id = ""
+        if db_id is not None:
+            try:
+                from db_config import get_conn
+                conn = get_conn()
+                try:
+                    row = conn.execute(
+                        "SELECT batch_id FROM draft_links WHERE id = ?", (db_id,)
+                    ).fetchone()
+                    if row:
+                        batch_id = row[0] or ""
+                finally:
+                    conn.close()
+            except Exception as e:
+                print(f"[Preview] 查询 batch_id 失败: {e}")
+
+        # ★ 高亮当前卡片
+        if hasattr(self, 'result_panel') and self.result_panel:
+            self.result_panel.update_preview_highlight()
+
+        # ★ 复用已有窗口时，先更新上下文，再 load
         if getattr(self, 'focus_window', None) and self.focus_window.isVisible():
             from PySide6.QtCore import QUrl
             self.focus_window.setWindowTitle(f"专注预览: {book_name or '未知作品'}")
-            # ★ 新增：UA 模式变了就切（不动窗口布局）
-
             self.focus_window._preview_url = raw_url
+
+            if hasattr(self.focus_window, "update_context"):
+                self.focus_window.update_context(
+                    book_name=book_name, category=category,
+                    batch_id=batch_id, db_id=db_id,
+                )
 
             cur = int(bool(getattr(self.focus_window, "is_mobile", 0)))
             if int(bool(is_mobile)) != cur:
@@ -137,10 +163,7 @@ class SearchConsolePage(QWidget):
             self.focus_window.web_view.load(QUrl(raw_url))
             return
 
-        from app_data import ALL_SUB_PLATFORMS
-        available_books = [b["name"] for b in self.input_panel.books_data.values()]
-        available_categories = list(ALL_SUB_PLATFORMS)
-
+        # 全新窗口
         main_layout = self.layout()
         main_layout.removeWidget(self.result_panel)
         self.result_panel.setParent(None)
@@ -151,17 +174,26 @@ class SearchConsolePage(QWidget):
             workbench_widget=self.result_panel,
             preview_url=raw_url,
             title=f"专注预览: {book_name or '未知作品'}",
-            is_mobile=is_mobile,  # ★ 新增
+            is_mobile=is_mobile,
+            book_name=book_name,
+            category=category,
+            batch_id=batch_id,
+            db_id=db_id,
         )
 
     def on_focus_window_closed(self):
         self.focus_window = None
-        self.active_preview_db_id = None
+        self.active_preview_db_id = None  # ★ 关闭时清空状态
         set_app_mode("idle")
         main_layout = self.layout()
         if main_layout.indexOf(self.result_panel) == -1:
             main_layout.addWidget(self.result_panel, 1)
+
         self.result_panel.refresh_tables()
+
+        # ★ 新增：关闭预览后，清除所有卡片的高亮
+        if hasattr(self, 'result_panel') and self.result_panel:
+            self.result_panel.update_preview_highlight()
 
     def refresh_tables(self):
         if hasattr(self, 'result_panel') and self.result_panel:

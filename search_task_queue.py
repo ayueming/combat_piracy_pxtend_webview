@@ -4,7 +4,7 @@ from datetime import datetime
 from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtWidgets import QMessageBox
 from db_config import get_conn
-from ws_server import current_context, dispatch_search_task, ws_signals
+from ws_server import dispatch_search_task, ws_signals
 from plugin_bridge import bridge_signals
 from parser_service import parser_signals
 from rate_limiter import global_limiter
@@ -48,6 +48,8 @@ class SearchTaskQueue(QObject):
         # 监听插件连接状态
         bridge_signals.plugin_disconnected.connect(self._on_plugin_disconnected)
         bridge_signals.plugin_connected.connect(self._on_plugin_connected)
+
+        self._consecutive_failures = 0
 
     def _cleanup_orphans(self):
         """清理因为软件异常关闭而卡在 running 状态的任务"""
@@ -99,8 +101,6 @@ class SearchTaskQueue(QObject):
             self._set_status(self._current_task_id, 'failed')
             self._current_task_id = None
 
-        # 清空当前上下文中的批次，防止后续脏数据关联
-        current_context["batch_id"] = ""
 
         self._session_batch_id = None
         self._ui_notified_batch = None
@@ -165,6 +165,7 @@ class SearchTaskQueue(QObject):
             conn.close()
 
     def start_all(self):
+        self._consecutive_failures = 0
         if self.is_running: return
         tasks = self.get_tasks()
         if not tasks: return
@@ -184,6 +185,7 @@ class SearchTaskQueue(QObject):
         self._execute_next()
 
     def start_one(self, task_id):
+        self._consecutive_failures = 0
         if self.is_running: return
 
         self._session_batch_id = f"SINGLE_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -227,18 +229,24 @@ class SearchTaskQueue(QObject):
         # ★ 使用外部的会话大 Batch
         batch_id = self._session_batch_id
 
-        current_context.update({
-            "book_name": task["book_name"],
-            "keyword": task["main_keyword"],
-            "batch_id": batch_id
-        })
+        # ★ 只派发一次，显式携带 book_name + batch_id
+        res = dispatch_search_task(
+            platform=task["platform"],
+            keyword=task["main_keyword"],
+            max_pages=task["max_pages"],
+            sub_kws=task["sub_keywords"],
+            book_name=task["book_name"],
+            batch_id=batch_id,
+        )
 
-        # ★ 核心：只有当当前的会话 batch 和已经通知过 UI 的不一样时，才切换 UI
+        # 会话 batch 变更时通知 UI 切换
         if self._ui_notified_batch != batch_id:
             queue_signals.batch_switched.emit(batch_id, task["book_name"])
             self._ui_notified_batch = batch_id
 
-        res = dispatch_search_task(task["platform"], task["main_keyword"], task["max_pages"], task["sub_keywords"])
+        # ★ 注意：这里绝对不能再调一次 dispatch_search_task，
+        #    否则 check_and_lock("searching") 会返回 "busy"，
+        #    下面 else 分支会 stop() 掉整个队列。
 
         if res in ("success", "opening"):
             self.timeout_timer.start(300000)
@@ -260,10 +268,30 @@ class SearchTaskQueue(QObject):
 
         if batch_id.startswith("ERROR_"):
             print(f"[Queue] ❌ 任务执行失败/超时，跳过解析，标记失败。")
+            self._consecutive_failures += 1
             self._set_status(self._current_task_id, 'failed')
             self._current_task_id = None
-            self._execute_next()  # 强行唤醒队列执行下一个
+
+            # ★ R5：连续失败 3 次 → 停止队列，避免死循环刷屏
+            if self._consecutive_failures >= 3:
+                print(f"[Queue] ❌ 连续失败 {self._consecutive_failures} 次，停止队列避免死循环")
+                self.stop()
+                QMessageBox.warning(
+                    None, "任务连续失败",
+                    "连续 3 次搜索任务失败，队列已自动停止。\n\n"
+                    "请检查：\n"
+                    "1. 浏览器是否正常运行\n"
+                    "2. 9333 端口是否可访问\n"
+                    "3. 插件是否已连接\n\n"
+                    "处理完后再重新点击执行。"
+                )
+                return
+
+            self._execute_next()
             return
+
+        # ★ R5：成功则清零
+        self._consecutive_failures = 0
 
         self._update_batch_id(self._current_task_id, batch_id)
         self._set_status(self._current_task_id, 'ready')

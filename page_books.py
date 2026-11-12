@@ -13,8 +13,6 @@ from PySide6.QtCore import Qt, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices, QColor, QPainter
 from db_config import get_conn
 
-from link_resolver import is_short_url
-
 # ★ 4.2：IdDelegate 泛化为 PatternCellDelegate + is_alnum_only
 from ui_components import (
     CenteredCheckBoxDelegate,

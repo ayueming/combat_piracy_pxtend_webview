@@ -33,51 +33,59 @@ bridge_signals = PluginBridgeSignals()
 
 class PluginBridge:
     def __init__(self):
-        self._ws = None
+        self._ws_list = []  # ★ 改用列表存多个连接
         self._loop = None
         self._connected_event = threading.Event()
         self._lock = threading.Lock()
 
     def set_websocket(self, ws):
         with self._lock:
-            self._ws = ws
+            if ws not in self._ws_list:
+                self._ws_list.append(ws)
             try:
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
                 self._loop = None
             self._connected_event.set()
-        print("🔌 插件连接已建立")
+        print(f"🔌 插件连接已建立 (当前在线页面: {len(self._ws_list)})")
         bridge_signals.plugin_connected.emit()
 
-    def clear_websocket(self):
+    def clear_websocket(self, ws=None):
         with self._lock:
-            self._ws = None
-            self._loop = None
-            self._connected_event.clear()
-        print("🔌 插件连接已断开")
-        bridge_signals.plugin_disconnected.emit()
+            if ws is None:
+                # ★ R1：无参 = 强制清空全部（restart / shutdown / 用户切换专用）
+                self._ws_list.clear()
+            elif ws in self._ws_list:
+                self._ws_list.remove(ws)
+            if not self._ws_list:
+                self._connected_event.clear()
+        print(f"🔌 插件连接已断开 (剩余在线页面: {len(self._ws_list)})")
+        if not self._ws_list:
+            bridge_signals.plugin_disconnected.emit()
 
     def is_connected(self):
         with self._lock:
-            return self._ws is not None
+            return len(self._ws_list) > 0
 
     def wait_connected(self, timeout=8.0):
         return self._connected_event.wait(timeout)
 
     def send_sync(self, payload):
         with self._lock:
-            ws = self._ws
+            ws_list = list(self._ws_list)
             loop = self._loop
-        if not ws or not loop:
+        if not ws_list or not loop:
             return False
-        try:
-            asyncio.run_coroutine_threadsafe(
-                ws.send(json.dumps(payload)), loop
-            )
-            return True
-        except Exception as e:
-            print(f"[Bridge] 发送失败: {e}")
-            return False
+
+        text_data = json.dumps(payload, ensure_ascii=False)
+        success = False
+        for ws in ws_list:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.send(text_data), loop)
+                success = True
+            except Exception as e:
+                print(f"[Bridge] 发送失败: {e}")
+        return success
 
 
 bridge = PluginBridge()
@@ -235,13 +243,48 @@ def get_browser_path():
     return None
 
 
+def _is_cdp_alive():
+    """探测 CDP 端口是否真的在监听（WS 通不等于 CDP 通）"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        ok = s.connect_ex(("127.0.0.1", CDP_PORT)) == 0
+        s.close()
+        return ok
+    except Exception:
+        return False
+
+
 def ensure_ready(business_name="业务", timeout=CDP_READY_TIMEOUT):
-    if bridge.is_connected():
+    import time as _time
+
+    # =========================================================
+    # ★ 第一阶段：物理探测优先。不要被内存里已经死掉的 WS 骗了
+    # =========================================================
+    if _is_cdp_alive():
         return True
 
+    # 如果 9333 还没通，给个 1.5 秒的宽限期（防止刚启动正在监听中）
+    deadline = _time.time() + 1.5
+    while _time.time() < deadline:
+        if _is_cdp_alive():
+            return True
+        _time.sleep(0.1)
+
+    # 如果宽限期过了还不通，说明此时绝对没有可用的 CDP 浏览器
+    # 如果此时 bridge 里还有连接，绝对是僵尸连接，立刻清理掉，免得干扰后续判断
+    if bridge.is_connected():
+        print(f"[Bridge] 发现陈旧的 WS 连接但 CDP 未监听，主动清理僵尸状态...")
+        bridge.clear_websocket()
+
+    # =========================================================
+    # ★ 第二阶段：抢锁并启动
+    # =========================================================
     if not _ready_lock.acquire(blocking=False):
         print(f"[Bridge] 已有线程在等待连接，跳过本次 {business_name} 的等待")
-        return bridge.is_connected()
+        # 稍微等一下，让正在启动的线程把浏览器拉起来，然后再探一次端口
+        _time.sleep(1.0)
+        return _is_cdp_alive()
 
     try:
         from db_config import get_current_user
@@ -276,16 +319,13 @@ def ensure_ready(business_name="业务", timeout=CDP_READY_TIMEOUT):
                 bridge.clear_websocket()
                 need_launch = True
 
+            # 如果 Playwright 进程句柄还在，但 CDP 没开（比如被外部干扰了）
             if not need_launch:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.0)
-                if s.connect_ex(("127.0.0.1", CDP_PORT)) != 0:
+                if not _is_cdp_alive():
                     print("[Bridge] 检测到现存浏览器未开启调试端口，准备重启以支持 CDP...")
                     _browser_proc = None
                     _browser_proc_user_id = None
-                    bridge.clear_websocket()
                     need_launch = True
-                s.close()
 
             if need_launch:
                 _force_kill_browser_by_profile(profile_dir)
@@ -305,12 +345,20 @@ def ensure_ready(business_name="业务", timeout=CDP_READY_TIMEOUT):
                 print(f"[Bridge] 专用浏览器已在运行 PID={_browser_proc.pid}，等待扩展连接...")
 
         print(f"⏳ 等待插件连接（最长 {timeout} 秒）...")
-        if bridge.wait_connected(timeout):
-            print("✅ 插件已连接")
-            return True
+        if not bridge.wait_connected(timeout):
+            print(f"⚠️ {business_name}：插件 {timeout} 秒内未连接")
+            bridge_signals.plugin_timeout.emit(business_name)
+            return False
 
-        print(f"⚠️ {business_name}：插件 {timeout} 秒内未连接")
-        bridge_signals.plugin_timeout.emit(business_name)
+        # ★ R4：WS 连上了，再等 CDP 端口真正监听（最多 3 秒）
+        deadline = _time.time() + 3.0
+        while _time.time() < deadline:
+            if _is_cdp_alive():
+                print("✅ 插件已连接，CDP 端口已监听")
+                return True
+            _time.sleep(0.1)
+
+        print(f"⚠️ {business_name}：插件已连，但 CDP 端口 {CDP_PORT} 3 秒内未监听")
         return False
     finally:
         _ready_lock.release()

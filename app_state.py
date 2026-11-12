@@ -114,6 +114,25 @@ class AppState:
         with self._lock:
             return self._active_tasks.pop(task_id, None)
 
+    def get_active_search_task(self):
+        """返回当前活跃的 do_search task（供 request_context 用），没有则 None。"""
+        with self._lock:
+            for t in self._active_tasks.values():
+                if t.get("action") == "do_search":
+                    return t
+        return None
+
+    def pop_tasks_by_batch(self, batch_id):
+        """清掉指定 batch 的所有活跃 task，返回删除数。解析完成时调用。"""
+        if not batch_id:
+            return 0
+        with self._lock:
+            to_del = [tid for tid, t in self._active_tasks.items()
+                      if t.get("batch_id") == batch_id]
+            for tid in to_del:
+                self._active_tasks.pop(tid, None)
+        return len(to_del)
+
 
 app_state = AppState()
 

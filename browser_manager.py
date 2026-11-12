@@ -178,27 +178,50 @@ class BrowserManager:
             print(f"✅ [BrowserManager] 成功接管插件浏览器！"
                   f"browser_tid={self._browser_thread_id} ctx_tid={self._context_thread_id} "
                   f"thread={threading.get_ident()}")
+
         except Exception as e:
             print(f"❌ [BrowserManager] CDP 接管失败，尝试强制重启浏览器... ({e})")
+
+            # ★ R3：先彻底清空本地的旧 Playwright 状态
+            try:
+                if self._pw:
+                    self._pw.stop()
+            except Exception:
+                pass
+            self._browser = None
+            self._context = None
+            self._pw = None
+            self._pw_thread_id = None
+            self._browser_thread_id = None
+            self._context_thread_id = None
+            self._picker_injected = False
+
             from plugin_bridge import restart_extension_browser
             restart_extension_browser(business_name="投诉接管重试")
 
             try:
+                # ★ R3：重启后必须重新 start playwright，不能复用旧的 _pw
+                self._pw = sync_playwright().start()
+                self._pw_thread_id = threading.get_ident()
                 self._browser = self._pw.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{CDP_PORT}"
                 )
-                self._browser_thread_id = threading.get_ident()  # 新增
+                self._browser_thread_id = threading.get_ident()
                 self._context = self._browser.contexts[0]
-                self._context_thread_id = threading.get_ident()  # 新增
+                self._context_thread_id = threading.get_ident()
                 if not self._picker_injected:
                     self._context.add_init_script(self._get_stealth_js())
                     self._picker_injected = True
                 print("✅ [BrowserManager] 重启后成功接管浏览器！")
             except Exception as retry_e:
                 print(f"❌ [BrowserManager] 重启后仍然接管失败: {retry_e}")
-                self._pw.stop()
+                try:
+                    if self._pw:
+                        self._pw.stop()
+                except Exception:
+                    pass
                 self._pw = None
-                self._pw_thread_id = None  # 新增
+                self._pw_thread_id = None
                 raise
 
     def _patch_page(self, page):

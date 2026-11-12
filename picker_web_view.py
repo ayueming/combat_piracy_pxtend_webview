@@ -4,7 +4,7 @@
 对外只暴露信号；锁、UA 切换、注入逻辑全部内部处理。
 """
 from PySide6.QtCore import QUrl, QFile, QIODevice, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QProgressBar
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebChannel import QWebChannel
@@ -51,6 +51,8 @@ class PickerWebView(QWidget):
         self._allow_change_category = allow_change_category
         self._is_mobile = int(bool(initial_is_mobile))
         self._locked = False
+        # ★ 清理阶段（about:blank）屏蔽进度条，防止闪一下
+        self._suppress_loading = False
 
         # ★ 内部抢锁
         if lock_mode and app_state.check_and_lock(lock_mode):
@@ -60,8 +62,20 @@ class PickerWebView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # ★ 顶部 3px 进度条：始终占位，值 0 时背景透明视觉不可见
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedHeight(3)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setStyleSheet("""
+            QProgressBar { background: transparent; border: none; }
+            QProgressBar::chunk { background: #1f6feb; }
+        """)
+        layout.addWidget(self._progress_bar)
+
         self.web_view = QWebEngineView()
-        # ★ 新增：绑定我们写的安全 Page 类
+        # ★ 绑定我们写的安全 Page 类
         self._setup_profile()
         layout.addWidget(self.web_view)
 
@@ -75,10 +89,16 @@ class PickerWebView(QWidget):
         self.bridge.batch_saved.connect(self.batch_saved.emit)
         self.bridge.ua_switched.connect(self._on_ua_switched)
 
+        # ★ 加载进度信号
+        self.web_view.loadStarted.connect(self._on_load_started)
+        self.web_view.loadProgress.connect(self._on_load_progress)
         self.web_view.loadFinished.connect(self._on_load_finished)
 
         self.web_view.renderProcessTerminated.connect(
-            lambda status, code: print(f"❌ [Picker] 渲染进程死了: status={status}, code={code}")
+            lambda status, code: (
+                self._progress_bar.setValue(0),
+                print(f"❌ [Picker] 渲染进程死了: status={status}, code={code}")
+            )
         )
         self.web_view.loadStarted.connect(
             lambda: print(f"▶️ [Picker] 开始加载网页...")
@@ -101,20 +121,12 @@ class PickerWebView(QWidget):
         if not url:
             return
 
-        # ★ 核心：使用 QUrl.fromUserInput 让 Qt 自动智能推断协议
-        # 它会自动把 "www.baidu.com" 变成 "http://www.baidu.com"
-        # 会自动处理 "//www.baidu.com"、"localhost:8080" 甚至 "C:\test.html"
+        # ★ 使用 QUrl.fromUserInput 让 Qt 自动智能推断协议
         qurl = QUrl.fromUserInput(url)
 
-        # 安全检查：如果解析出来还是个无效的（比如输入了一堆乱码中文），直接拦截
         if not qurl.isValid() or qurl.isEmpty():
             print(f"❌ [Picker] 无效的 URL，拒绝加载: {url}")
             return
-
-        # 如果你只想允许 http/https 协议（防止用户输入本地 exe 或 file 路径），可以加这层判断
-        # if qurl.scheme() not in ("http", "https"):
-        #     print(f"❌ [Picker] 非法的协议类型，拒绝加载: {qurl.scheme()}")
-        #     return
 
         print(f"🌐 [Picker] 正在加载: {qurl.toString()}")
         self.web_view.load(qurl)
@@ -129,10 +141,21 @@ class PickerWebView(QWidget):
             from app_data.mobile_consts import MOBILE_UA, DESKTOP_UA
             page.profile().setHttpUserAgent(MOBILE_UA if target else DESKTOP_UA)
 
+    # ---------- 内部：加载进度 ----------
+    def _on_load_started(self):
+        if self._suppress_loading:
+            return
+        self._progress_bar.setValue(0)
+
+    def _on_load_progress(self, p: int):
+        if self._suppress_loading:
+            return
+        self._progress_bar.setValue(p)
+
     # ---------- 内部 ----------
     def _setup_profile(self):
         self.profile = create_preview_profile(self.web_view, self._is_mobile)
-        # ★ 核心修改：直接把原来的 QWebEnginePage 替换为我们写的 SafeWebPage，并传入 profile
+        # ★ 直接把原来的 QWebEnginePage 替换为 SafeWebPage，并传入 profile
         self.page = SafeWebPage(self.profile, self.web_view)
         self.web_view.setPage(self.page)
 
@@ -142,6 +165,8 @@ class PickerWebView(QWidget):
         self.web_view.reload()
 
     def _on_load_finished(self, ok):
+        # ★ 结束归零（进度条始终占位，视觉上即隐藏）
+        self._progress_bar.setValue(0)
         if not ok:
             return
         f = QFile(":/qtwebchannel/qwebchannel.js")
@@ -166,6 +191,8 @@ class PickerWebView(QWidget):
 
     def destroy_picker(self):
         """安全停止 WebView 加载，防止后台网络线程崩溃"""
+        # ★ 屏蔽清理阶段 about:blank 触发的进度条闪动
+        self._suppress_loading = True
         try:
             if hasattr(self, "channel") and self.channel and hasattr(self, "bridge"):
                 self.channel.deregisterObject(self.bridge)

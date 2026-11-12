@@ -3,7 +3,6 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
                                QApplication, QMessageBox)
 from PySide6.QtCore import Qt, QUrl
 
-from ws_server import current_context
 from app_data import ALL_SUB_PLATFORMS
 from mobile_url_utils import resolve_is_mobile
 from picker_web_view import PickerWebView
@@ -11,13 +10,21 @@ from picker_web_view import PickerWebView
 
 class BaseFocusWindow(QWidget):
     def __init__(self, main_page, workbench_widget, preview_url="",
-                 title="专注预览 (按 Esc 退出)", is_mobile=0):
+                 title="专注预览 (按 Esc 退出)", is_mobile=0,
+                 book_name="", category="", batch_id="", db_id=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose, True)  # ★ 让 close 走 deleteLater
         self.main_page = main_page
         self.workbench_widget = workbench_widget
         self.preview_url = preview_url
         self.is_mobile = resolve_is_mobile(is_mobile, preview_url)
+
+        # ★ 显式上下文（不再依赖 ws_server.current_context）
+        self.book_name = book_name or ""
+        self.category = category or "其他"
+        self.batch_id = batch_id or ""
+        self.db_id = db_id
+
         self._closed_handled = False
         self._lock_failed = False
 
@@ -77,14 +84,23 @@ class BaseFocusWindow(QWidget):
         if hasattr(self.main_page, "input_panel") and hasattr(self.main_page.input_panel, "books_data"):
             books = [b["name"] for b in self.main_page.input_panel.books_data.values()]
         return {
-            "book_name": current_context.get("book_name", ""),
-            "category": current_context.get("source_platform", "") or "其他",
-            "keyword": current_context.get("keyword", ""),
-            "batch_id": current_context.get("batch_id", ""),
-            "source_platform": current_context.get("source_platform", ""),
+            "book_name": self.book_name,
+            "category": self.category,
+            "keyword": "",   # 预览场景不再展示关键词（picker 面板显示 "-" 即可）
+            "batch_id": self.batch_id,
+            "source_platform": self.category,
             "books": books,
             "categories": list(ALL_SUB_PLATFORMS),
         }
+
+    def update_context(self, book_name="", category="", batch_id="", db_id=None):
+        """供 page_search 在复用已有窗口、切换到另一条卡片时调用。
+        PickerWebView 每次 load 完成会用最新的 _build_ctx() 重新注入 JS，
+        所以这里更新完属性后，下一次 load_url 就会带新 batch_id。"""
+        self.book_name = book_name or ""
+        self.category = category or "其他"
+        self.batch_id = batch_id or ""
+        self.db_id = db_id
 
     def set_mobile_mode(self, is_mobile):
         """供 page_search.py 复用已有窗口时切换 UA。"""
@@ -95,14 +111,16 @@ class BaseFocusWindow(QWidget):
         self.picker.set_mobile_mode(target)
 
     @classmethod
-    def launch(cls, main_page, workbench_widget, preview_url, title="专注预览", is_mobile=0):
+    def launch(cls, main_page, workbench_widget, preview_url, title="专注预览", is_mobile=0,
+               book_name="", category="", batch_id="", db_id=None):
         if not preview_url:
             return None
 
         if getattr(main_page, "focus_window", None):
             main_page.focus_window.close()
 
-        win = cls(main_page, workbench_widget, preview_url, title, is_mobile=is_mobile)
+        win = cls(main_page, workbench_widget, preview_url, title, is_mobile=is_mobile,
+                  book_name=book_name, category=category, batch_id=batch_id, db_id=db_id)
 
         if win._lock_failed:
             try:
@@ -141,7 +159,6 @@ class BaseFocusWindow(QWidget):
             except Exception:
                 pass
             self.picker.release_lock()
-            # ★ 不要 self.picker = None，让 WA_DeleteOnClose 统一销毁
 
         if self.workbench_widget is not None:
             self.workbench_widget.setParent(None)

@@ -29,3 +29,9 @@ venv/
 # --- IDE 配置 ---
 .idea/
 .vscode/
+/imag/
+/bridges/
+/my_ext_ui/
+/sidepanel-demo/
+/web_ui/
+/my_extension_web/
