@@ -21,6 +21,7 @@ class WsSignals(QObject):
     scan_state_changed = Signal(str)
     search_finished = Signal(str)
     search_progress = Signal(str, int, int)
+    batch_finished = Signal(str)
 
 
 ws_signals = WsSignals()

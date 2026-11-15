@@ -348,17 +348,29 @@ class DataCard(QFrame):
     # ★ 新增：动态切换底色
     def set_highlight(self, is_active):
         style = CARD_STYLES.get(self.status, CARD_STYLES["未知网站"])
-        if is_active:
-            bg = "#EFF6FF"  # 浅蓝色背景
-            border = "1px solid #3B82F6"  # 蓝色边框
-        else:
-            bg = "#FFFFFF"
-            border = "1px solid #E5E7EB"
+
+        # 让 QSS 用 [active="true"] 区分"选中"
+        self.setProperty("active", "true" if is_active else "false")
 
         self.setStyleSheet(
-            f"#DataCard {{ background-color: {bg}; border: {border}; border-left: {style['border']}; border-radius: 6px; }}"
-            f"#DataCard:hover {{ background-color: #F8FAFC; border: 1px solid #93C5FD; border-left: {style['border']}; }}"
+            f"#DataCard {{"
+            f"  background-color: #FFFFFF;"
+            f"  border: 2px solid #E5E7EB;"
+            f"  border-left: {style['border']};"
+            f"  border-radius: 6px;"
+            f"}}"
+            f"#DataCard:hover {{"
+            f"  border: 2px solid #93C5FD;"
+            f"  border-left: {style['border']};"
+            f"}}"
+            f"#DataCard[active=\"true\"] {{"
+            f"  background-color: #EFF6FF;"
+            f"}}"
         )
+
+        # 动态属性变更后必须重新 polish，否则 [active] 选择器不生效
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     # ★ 新增：平滑折叠消失动画
     def smooth_disappear(self):
@@ -692,7 +704,7 @@ class SearchResultPanel(QWidget):
 
         bottom_layout.addStretch()
 
-        self.btn_del_sel = QPushButton("清空当前分类")
+        self.btn_del_sel = QPushButton("清空本次搜索结果")
         self.btn_del_sel.setStyleSheet(
             "QPushButton { border: none; background: transparent; color: #DC2626; font-size: 13px; padding: 5px; } QPushButton:hover { text-decoration: underline; }")
         self.btn_del_sel.setCursor(Qt.PointingHandCursor)
@@ -867,24 +879,35 @@ class SearchResultPanel(QWidget):
         self.request_preview.emit(db_id, raw_url, category, book_name, is_mobile)
 
     def delete_selected_drafts(self):
-        current_index = self.tab_bar.currentIndex()
-        current_list = [self.list_todo, self.list_pending, self.list_archive][current_index]
-        if not current_list.all_records:
-            QMessageBox.information(self, "提示", "当前分类下没有数据。")
+        """清空本次搜索结果里所有 tab 的 draft（不区分 tab）"""
+        # 重新拉一次，避免用 _cached_tables 里可能已过期的数据
+        tables = get_batch_tables(self.current_batch_id)
+
+        ids_to_delete = []
+        for key in ("tab1_todo", "tab2_pending", "tab3_archive"):
+            for r in tables.get(key, []):
+                ids_to_delete.append(r[0])
+
+        if not ids_to_delete:
+            QMessageBox.information(self, "提示", "本次搜索结果没有可清空的数据。")
             return
+
         reply = QMessageBox.question(
-            self, "确认清空",
-            f"当前分类共有 {len(current_list.all_records)} 条草稿，确定全部删除吗？\n\n"
-            f"（此操作仅从草稿箱移除，不影响已入库的资源和黑名单）",
+            self, "确认清空本次搜索结果",
+            f"本次搜索结果共 {len(ids_to_delete)} 条记录，确定全部清空吗？\n\n"
+            f"（仅从草稿箱移除，不影响已入库的资源和黑名单）",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
 
-        ids_to_delete = [r[0] for r in current_list.all_records]
-        if ids_to_delete:
-            clear_draft_category(ids_to_delete)
-            self.refresh_tables()
+        # 传全量 id 给底层，底层只处理 draft 表里的行；
+        # tab3 里的"已在库/白名单/已永删"本就是归档状态，不会受影响
+        clear_draft_category(ids_to_delete)
+
+        # 回到"待处理" tab，方便用户直观看到已清空
+        self.tab_bar.setCurrentIndex(0)
+        self.refresh_tables()
 
     def show_list_manager(self):
         from list_manager_dialog import ListManagerDialog

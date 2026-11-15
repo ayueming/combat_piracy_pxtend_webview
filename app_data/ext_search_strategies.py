@@ -137,6 +137,59 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": []
         }
     },
+    "爱搜": {
+        "mode": "click",
+        "scanner": "generic",
+        "base_url": "https://www.esoua.com",
+        "resultSelector": "article[class*='_searchItem_']",
+        "titleSelector": "a[class*='_searchItemTitle_']",
+        "bodySelector": "div[class*='_searchItemInfo_']",
+        "sourceSelector": "span[class*='_searchItemLogo_']",
+
+        # ★ 关键修改：直接定位包含“下一页”文字的 button
+        # 现在的写法是：找含有“下一页”文字的 button，且它没有被禁用（!:not([disabled])）
+        "nextBtnSelector": "button:has-text('下一页'):not([disabled])",
+
+        "urlExtract": {
+            "rules": [
+                {"selector": "a[class*='_searchItemTitle_']", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        },
+        "detailExtract": {
+            "wait_selector": "a[class*='_jumpLink_']",
+            "rules": [
+                {"selector": "a[class*='_jumpLink_']", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        }
+    },
+    "影盘社": {
+        "mode": "click",
+        "scanner": "generic",
+        "base_url": "https://melost.cn",  # ★ 关键修改：真实的域名
+        "resultSelector": "article[class*='_searchItem_']",
+        "titleSelector": "a[class*='_searchItemTitle_']",
+        "bodySelector": "div[class*='_searchItemInfo_']",
+        "sourceSelector": "span[class*='_searchItemLogo_']",
+        # 下一页按钮：找含有“下一页”文字且未禁用的按钮
+        "nextBtnSelector": "nav[class*='_pagination_'] button:last-child:not([disabled])",
+        "urlExtract": {
+            "rules": [
+                # 一阶段：提取详情页相对路径
+                {"selector": "a[class*='_searchItemTitle_']", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        },
+        # 二阶段详情页剥壳
+        "detailExtract": {
+            "wait_selector": "a[class*=_jumpLink]",
+            "rules": [
+                {"selector": "a[class*=_jumpLink]", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        }
+    },
     "微博搜索": {
         "mode": "click",
         "scanner": "generic",

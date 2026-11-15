@@ -425,7 +425,9 @@ class SearchInputPanel(QWidget):
         self.page_limit_combo = QComboBox()
         self.page_limit_combo.addItems(["1页", "2页", "3页", "4页", "5页"])
         self.page_limit_combo.setCurrentIndex(2)
-        self.page_limit_combo.setStyleSheet(input_style)
+        self.page_limit_combo.setStyleSheet(input_style + """
+            QComboBox { padding: 3px 10px; }
+        """)
 
         self.page_limit_combo.setFixedWidth(80)
 
@@ -537,58 +539,34 @@ class SearchInputPanel(QWidget):
             QMessageBox.warning(self, "提示", "请先按 Esc 退出专注预览模式，再进行自动搜索。")
             return
 
-        draft_count = check_drafts_exist()
-        if draft_count > 0:
-            QMessageBox.warning(
-                self, "提示",
-                f"发现还有 {draft_count} 条草稿尚未处理完毕。\n\n"
-                f"请先将右侧的数据处理完（入库 / 永删 / 忽略），\n"
-                f"或者直接点击右下角的【清空当前分类】清理掉它们，\n"
-                f"然后再进行下一次搜索。"
-            )
-            return
-
         main_kw = self.main_kw_input.text().strip()
         if not main_kw:
             QMessageBox.warning(self, "提示", "主关键词不能为空")
             return
 
         platform = self.platform_combo.currentText()
-        safe_platform = platform.replace("(", "").replace(")", "")
-        self.main_page.current_batch_id = f"{safe_platform}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-        self.main_page.result_panel.current_batch_id = self.main_page.current_batch_id
-
-        page_limit_text = self.page_limit_combo.currentText()
-        max_pages = int(page_limit_text.replace("页", ""))
+        max_pages = int(self.page_limit_combo.currentText().replace("页", ""))
         sub_kws = list(self.selected_sub_kws)
 
-        # 派发任务
-        result = dispatch_search_task(
-            platform=platform,
-            keyword=main_kw,
-            max_pages=max_pages,
-            sub_kws=sub_kws,
-            book_name=self.book_combo.currentText(),
-            batch_id=self.main_page.current_batch_id,
-        )
-        print(f"🚦 [DEBUG] 搜索派发结果: {result}")
+        # ★ 只对上游参数负责，不落 search_tasks 表，不做去重
+        task_data = {
+            "id": None,
+            "book_id": self.book_combo.currentData(),
+            "book_name": self.book_combo.currentText(),
+            "platform": platform,
+            "main_keyword": main_kw,
+            "sub_keywords": sub_kws,
+            "max_pages": max_pages,
+        }
 
-        if result == "success":
+        from search_task_queue import task_queue
+        ok = task_queue.start_one(task_data)  # 默认 SINGLE_ 前缀，内部做草稿检查
+
+        if ok:
             ToastLabel(self.main_page, "🚀 已下发搜索任务...", "#3B82F6")
             self.btn_search.setEnabled(False)
             self.btn_search.setText("🔄 搜索中...")
-
-        elif result == "opening":
-            ToastLabel(self.main_page, "🌐 正在启动浏览器，请稍候...", "#F59E0B")
-            self.btn_search.setEnabled(False)
-            self.btn_search.setText("🔄 搜索中...")
-        elif result == "busy":
-            ToastLabel(self.main_page, "⏳ 已有搜索任务进行中，请等待完成", "#F59E0B")
-        elif result == "no_browser":
-            QMessageBox.warning(self, "缺少浏览器", "未检测到 Chrome 或 Edge 浏览器！\n请先安装后再试。")
-        else:
-            QMessageBox.warning(self, "提示", "任务派发失败，请稍后重试。")
+        # 失败时队列层已经弹过窗，无需再处理
 
     # ★ 强制停止逻辑（防卡死）
     def _on_stop_search(self):

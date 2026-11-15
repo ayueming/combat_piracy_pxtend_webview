@@ -14,6 +14,9 @@ SEARCH_PLATFORM_PRIORITY = [
     "夸克搜索",
     "百度知道",
     "百度贴吧",
+    '爱网盘',
+    '爱搜',
+    '影盘社'
     # "uc搜索",  还没开发，先注释掉
 ]
 
@@ -63,6 +66,22 @@ SEARCH_TEMPLATES = {
         "mode": "direct",
         "exact_support": "none",
         "real_platform": "爱网盘",
+        "is_mobile": False,
+        "note": "网盘聚合搜索",
+    },
+    "爱搜": {
+        "template": "https://www.esoua.com/search?q={kw}&exact=true",
+        "mode": "direct",
+        "exact_support": "none",
+        "real_platform": "爱搜",
+        "is_mobile": False,
+        "note": "网盘聚合搜索",
+    },
+    "影盘社": {
+        "template": "https://melost.cn/search?q={kw}&page=1&exact=true",
+        "mode": "direct",
+        "exact_support": "none",
+        "real_platform": "影盘社",
         "is_mobile": False,
         "note": "网盘聚合搜索",
     },

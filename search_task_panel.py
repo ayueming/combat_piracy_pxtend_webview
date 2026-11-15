@@ -100,22 +100,18 @@ class TaskRow(QFrame):
 
     def _on_run(self):
         if self.data["status"] == "running":
-            QMessageBox.information(self, "提示",
-                                    "该任务当前正在执行中，请勿重复点击。\n如果已卡死，请点击上方的「停止」按钮。")
-            return
-        if task_queue.is_running:
-            QMessageBox.warning(self, "提示", "队列中已有其他任务正在执行，请先等待或点击「停止」。")
-            return
-        from link_ingest_service import check_drafts_exist
-        if check_drafts_exist() > 0:
-            QMessageBox.warning(
+            QMessageBox.information(
                 self, "提示",
-                "发现还有草稿尚未处理完毕。\n\n"
-                "请先将右侧数据（入库/永删/忽略）处理完，\n"
-                "或点击右下角【清空当前分类】清理后，再进行搜索。"
+                "该任务当前正在执行中，请勿重复点击。\n如果已卡死，请点击上方的「停止」按钮。"
             )
             return
-        task_queue.start_one(self.data["id"])
+
+        task = task_queue.get_task_by_id(self.data["id"])
+        if not task:
+            QMessageBox.warning(self, "提示", "任务已不存在，请刷新队列。")
+            return
+
+        task_queue.start_one(task)  # 内部做 is_running 和草稿检查，失败自己弹窗
 
     def _on_del(self):
         if self.data["status"] == "running":
@@ -169,7 +165,7 @@ class SearchTaskPanel(QWidget):
         self.btn_stop.setStyleSheet(
             "QPushButton { border: none; background: transparent; color: #EF4444; font-size: 12px; font-weight: bold; padding: 0; } QPushButton:hover { color: #DC2626; }")
         self.btn_stop.setCursor(Qt.PointingHandCursor)
-        self.btn_stop.clicked.connect(task_queue.stop)
+        self.btn_stop.clicked.connect(lambda: task_queue.stop("user"))
         self.btn_stop.hide()
 
         header.addWidget(self.btn_add)
@@ -255,21 +251,7 @@ class SearchTaskPanel(QWidget):
             )
 
     def _run_all(self):
-        if task_queue.is_running: return
-        tasks = task_queue.get_tasks()
-        if not tasks: return
-
-        from link_ingest_service import check_drafts_exist
-        if check_drafts_exist() > 0:
-            QMessageBox.warning(
-                self, "提示",
-                "发现还有草稿尚未处理完毕。\n\n"
-                "请先将右侧数据（入库/永删/忽略）处理完，\n"
-                "或点击右下角【清空当前分类】清理后，再进行批量搜索。"
-            )
-            return
-
-        task_queue.start_all()
+        task_queue.start_all()  # 内部做 is_running、空队列、草稿检查，失败自己弹窗
 
     def _on_batch_switched(self, batch_id, book_name):
         if not self.main_page: return

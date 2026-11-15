@@ -195,17 +195,35 @@ def _build_browser_cmd(exe, wakeup_url, profile_dir):
         "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
+        # ===== Safe Browsing 全关 =====
+        "--disable-features=SafeBrowsing,"
+                           "ClientSideDetection,"
+                           "ClientSidePhishingDetection,"
+                           "SafeBrowsingEnhancedProtection,"
+                           "SafeBrowsingRealTimeUrlLookup,"
+                           "InsecureDownloadWarnings,"
+                           "HttpsUpgrades,"
+                           "HttpsFirstBalancedModeAutoEnable,"
+                           "HttpsFirstModeV2,"
+                           "HttpsFirstModeIncognito",
+        "--safebrowsing-disable-auto-update",
+        "--safebrowsing-disable-download-protection",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-update",
+        "--disable-background-networking",
+        "--disable-domain-reliability",
+        "--no-pings",
+        # ===== 证书 / 混合内容（盗文站常见自签/过期证书）=====
+        "--ignore-certificate-errors",
+        "--allow-running-insecure-content",
+        "--allow-insecure-localhost",
     ]
-
+    # 下面保持你原来的扩展加载逻辑
     if EXTENSION_DEV_MODE:
-        plugin_dir = _get_plugin_dir()  # ★ 使用智能查找
+        plugin_dir = _get_plugin_dir()
         if plugin_dir:
             cmd.append(f"--load-extension={plugin_dir}")
             cmd.append(f"--disable-extensions-except={plugin_dir}")
-            print(f"[Bridge] 插件加载路径: {plugin_dir}")
-        else:
-            print("[Bridge] ⚠️ 严重警告：找不到 my_extension 插件目录！")
-
     if wakeup_url:
         cmd.append(wakeup_url)
     return cmd

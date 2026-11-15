@@ -48,6 +48,22 @@ class BaseFocusWindow(QWidget):
         # ★ 兼容 page_search.py 里对 focus_window.web_view 的直接引用
         self.web_view = self.picker.web_view
 
+        # ===== 网页缩放：80% =====
+        ZOOM_FACTOR = 0.8
+
+        def _apply_zoom(_ok=None):
+            try:
+                if getattr(self, "web_view", None) is None:
+                    return
+                self.web_view.setZoomFactor(ZOOM_FACTOR)
+            except RuntimeError:
+                pass
+            except Exception as e:
+                print(f"[FocusWindow] setZoomFactor 失败: {e}")
+
+        self.web_view.loadStarted.connect(_apply_zoom)  # ★ 新增：请求一发出就设
+        self.web_view.loadFinished.connect(_apply_zoom)  # 兜底（页面 JS 改过 zoom 也能纠正）
+
         if not self.picker.is_locked_by_us():
             self._lock_failed = True
             return
@@ -57,7 +73,7 @@ class BaseFocusWindow(QWidget):
         self.picker.picked.connect(lambda rec: ws_signals.new_data_inserted.emit(1))
         self.picker.batch_saved.connect(lambda bid: ws_signals.new_data_inserted.emit(1))
 
-        main_layout.addWidget(self.picker, 65)
+        main_layout.addWidget(self.picker, 55)
 
         # ===== 右侧：workbench =====
         right_panel = QWidget()
@@ -77,7 +93,7 @@ class BaseFocusWindow(QWidget):
         if self.workbench_widget is not None:
             right_layout.addWidget(self.workbench_widget, 1)
 
-        main_layout.addWidget(right_panel, 35)
+        main_layout.addWidget(right_panel, 45)
 
     def _build_ctx(self):
         books = []

@@ -44,7 +44,8 @@ def _handle_scan_finished(data):
     ws_signals.scan_state_changed.emit("idle")
 
 
-def dispatch_search_task(platform, keyword, max_pages, sub_kws=None, book_name="", batch_id=""):
+def dispatch_search_task(platform, keyword, max_pages, sub_kws=None,
+                         book_name="", batch_id="", book_id=None):
     if not app_state.check_and_lock("searching"):
         return "busy"
     if app_state.is_busy():
@@ -72,6 +73,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None, book_name="
         "is_mobile": is_mobile,
         "keyword": keyword,
         "book_name": book_name,  # ★ 使用传入的 book_name
+        "book_id": book_id,
         "max_pages": max_pages,
         "url": url,
         "strategy": strategy,
@@ -106,6 +108,7 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None, book_name="
                     "is_mobile": is_mobile,
                     "keyword": task["keyword"],
                     "book_name": task["book_name"],
+                    "book_id": task.get("book_id"),
                     "batch_id": task["batch_id"],
                     "pick_origin": "机器人获取",
                 }

@@ -473,6 +473,15 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                  book_id, book_name, target_platform, fetch_time, batch_id,
                  parent_url, parent_title, is_mobile, first_url, second_url) = row  # ★ 增加解包
 
+                # ★ B：book_id 缺失时按书名反查 books 表兜底
+                #    覆盖历史脏数据 / 手动拾取 / 表格导入等 book_id 为空的路径
+                if not book_id and book_name:
+                    b = cursor.execute(
+                        "SELECT id FROM books WHERE name = ? LIMIT 1", (book_name,)
+                    ).fetchone()
+                    if b:
+                        book_id = b[0]
+
                 try:
                     cursor.execute(
                         "INSERT INTO sites (category, target_platform, site_url, name, original_title, body_text, "
@@ -519,7 +528,18 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
 def change_draft_book(db_id, book_name):
     conn = get_conn()
     try:
-        conn.execute("UPDATE draft_links SET book_name = ? WHERE id = ?", (book_name, db_id))
+        cursor = conn.cursor()
+        new_book_id = None
+        if book_name:
+            row = cursor.execute(
+                "SELECT id FROM books WHERE name = ? LIMIT 1", (book_name,)
+            ).fetchone()
+            if row:
+                new_book_id = row[0]
+        cursor.execute(
+            "UPDATE draft_links SET book_name = ?, book_id = ? WHERE id = ?",
+            (book_name, new_book_id, db_id)
+        )
         conn.commit()
     finally:
         conn.close()

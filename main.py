@@ -207,6 +207,7 @@ class MainApp(FluentWindow):
 
         # ===== 3. 监听后台信号 =====
         ws_signals.new_data_inserted.connect(self.on_new_data)
+        ws_signals.batch_finished.connect(self._on_batch_finished)
 
         # ===== 4. 监听页面切换，触发数据刷新 =====
         self.stackedWidget.currentChanged.connect(self.change_page)
@@ -298,6 +299,12 @@ class MainApp(FluentWindow):
     def on_new_data(self, count):
         """后台洗完数据后，自动刷新你的检索页"""
         print(f"UI收到通知：后台新增 {count} 条数据，正在刷新界面...")
+
+    def _on_batch_finished(self, batch_id):
+        """一次搜索 batch 彻底结束（正常/停止/失败/断联均算），任务栏图标闪烁提醒。"""
+        print(f"[UI] batch 结束，触发图标闪烁: {batch_id}")
+        QApplication.alert(self, 0)  # 0 = 一直闪到窗口被激活
+        QTimer.singleShot(10000, lambda: QApplication.alert(self, 1))  # 10s 兜底停
 
     def closeEvent(self, event):
         # spontaneous=True  → 用户/系统点了 X 或者 Alt+F4
