@@ -1,4 +1,14 @@
 # link_ingest_service.py
+"""
+链接摄入服务。三段式职责：
+
+  1. save_picked_link        入口：极简写库，全量 PENDING，不做任何判断
+  2. organize_pending_links  流水线：短链展开→白黄黑查重→详情剥壳→分类→写终态
+                              （依赖 link_resolver 做 URL 变换，本函数只做业务决策）
+  3. archive_batch_by_ids    归档：终态记录写入 sites / ignored_links / 删除
+
+不属于本模块的：URL 的"展开/剥壳"（→ link_resolver），短链规则定义（→ data_app/crawl_consts.py）。
+"""
 
 import sqlite3
 import time
@@ -62,12 +72,11 @@ def _clean_text_for_match(t):
 
 
 def _resolve_url(raw_url, resolver, is_mobile=0):
-    if not resolver._is_short_url(raw_url):
+    if not resolver.needs_resolve(raw_url):          # ★ 原来是 _is_short_url
         return raw_url
     try:
-        # 把 is_mobile 传给工人
         parsed = resolver.resolve_single(raw_url, is_mobile)
-        if parsed and not resolver._is_short_url(parsed):
+        if parsed and not resolver.needs_resolve(parsed):   # ★ 同步改
             return parsed
         return None
     except Exception:
@@ -221,8 +230,9 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     return record, False, True
 
 
-def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, process_events_func=None,
-                           only_manual=False):
+def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None,
+                           process_events_func=None, only_manual=False,
+                           target_db_id=None):
     ensure_schema()
     from link_resolver import LinkResolver
     from browser_manager import BrowserManager
@@ -230,23 +240,29 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None, 
     conn = get_conn()
     cursor = conn.cursor()
 
-    # ★ 核心修改：读 first_url
     _sel = ("SELECT id, first_url, source_platform, name, source_keyword, body_text, source_site, attr, is_mobile "
             "FROM draft_links WHERE crawl_status = ?")
 
-    if batch_id == "LEGACY_BATCH":
+    # ★ 单条模式优先
+    if target_db_id is not None:
+        cond = " AND id = ?"
+        params = [CRAWL_STATUS_PENDING, int(target_db_id)]
+    elif batch_id == "LEGACY_BATCH":
         cond = " AND (batch_id IS NULL OR batch_id = '')"
         params = [CRAWL_STATUS_PENDING]
-        if only_manual: cond += " AND attr = '手动获取'"
-    elif batch_id and batch_id != "ALL":  # ★ 核心修改：遇到 "ALL" 强制走 else 全局查询
+        if only_manual:
+            cond += " AND attr = '手动获取'"
+    elif batch_id and batch_id != "ALL":
         cond = " AND batch_id = ?"
         params = [CRAWL_STATUS_PENDING, batch_id]
-        if only_manual: cond += " AND attr = '手动获取'"
+        if only_manual:
+            cond += " AND attr = '手动获取'"
     else:
-        # 此时无论 batch_id 是 None 还是 "ALL"，都会查全库
+        # batch_id 为 None 或 "ALL" 都查全库
         cond = ""
         params = [CRAWL_STATUS_PENDING]
-        if only_manual: cond += " AND attr = '手动获取'"
+        if only_manual:
+            cond += " AND attr = '手动获取'"
 
     records = cursor.execute(_sel + cond, params).fetchall()
     total = len(records)

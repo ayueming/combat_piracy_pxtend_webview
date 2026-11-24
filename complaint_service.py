@@ -14,6 +14,8 @@ from app_data.complaint_consts import (
     HOLDER_EVIDENCE_TYPES
 )
 
+from app_data.link_columns import COL_CHK, COL_BOOK, COL_CAT, COL_URL, COL_PUBLISHER
+
 
 def prepare_complaints_data(model, book_list):
     checked_data = []
@@ -55,13 +57,13 @@ def prepare_complaints_data(model, book_list):
 
     # 3. 遍历模型，执行校验
     for row_idx in range(model.rowCount()):
-        chk_item = model.item(row_idx, 0)
+        chk_item = model.item(row_idx, COL_CHK)
         if not chk_item or chk_item.checkState() != Qt.Checked:
             continue
 
-        book_name = model.item(row_idx, 1).text().strip()
-        raw_cat = model.item(row_idx, 2).text().strip()
-        raw_url = model.item(row_idx, 3).text().replace(" (重复资源链接)", "").strip()
+        book_name = model.item(row_idx, COL_BOOK).text().strip()
+        raw_cat = model.item(row_idx, COL_CAT).text().strip()
+        raw_url = model.item(row_idx, COL_URL).text().replace(" (重复资源链接)", "").strip()
         db_id = chk_item.data(Qt.UserRole)
 
         if not book_name or not raw_cat or not raw_url:

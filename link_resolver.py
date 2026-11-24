@@ -5,24 +5,15 @@ import time
 import random
 import urllib.request
 
-from app_data.crawl_consts import SHORT_URL_PATTERNS, INTERMEDIATE_URL_PATTERNS
+from app_data.crawl_consts import (
+    SHORT_URL_PATTERNS,          # 保留导入，防止外部 from link_resolver import SHORT_URL_PATTERNS
+    INTERMEDIATE_URL_PATTERNS,   # 同上
+    is_short_url,                # ★ 从 crawl_consts 转出
+    is_intermediate_url,         # ★ 从 crawl_consts 转出
+    is_param_intermediate_url, try_extract_param_url,
+)
 from app_data.mobile_consts import DESKTOP_UA, MOBILE_UA
 from rate_limiter import global_limiter  # ★ 引入全局节拍器
-
-
-def is_short_url(url) -> bool:
-    """命中短链白名单即返回 True（百度短链 / 百度移动端 / 微博中转）"""
-    if not url:
-        return False
-    return any(re.search(p, url) for p in SHORT_URL_PATTERNS)
-
-
-def is_intermediate_url(url) -> bool:
-    """命中中转页白名单即返回 True（如微博 visitor 中转页）。
-    中转页不是终点：它是 200 + JS 跳转，urllib 无法继续，需要 Playwright 执行 JS。"""
-    if not url:
-        return False
-    return any(re.search(p, url) for p in INTERMEDIATE_URL_PATTERNS)
 
 
 class LinkResolver:
@@ -35,12 +26,39 @@ class LinkResolver:
     def _is_intermediate_url(self, url):
         return is_intermediate_url(url)
 
+    def needs_resolve(self, url):
+        """统一"待展开"概念：短链 ∪ 中转页 ∪ 参数式中转"""
+        return (is_short_url(url)
+                or is_intermediate_url(url)
+                or is_param_intermediate_url(url))
+
     def _is_unresolved(self, url):
-        """URL 仍未解析完成：是短链，或停在中转页"""
-        return is_short_url(url) or is_intermediate_url(url)
+        # 原来只有 short/intermediate，补上参数式，让 Playwright 的 wait_for_url 也能感知
+        return self.needs_resolve(url)
+
+    def _try_offline_resolve(self, url, max_depth=3):
+        """只解参数式中转，可处理嵌套 a→b→c；到短链就停，交给网络路径"""
+        current = url
+        for _ in range(max_depth):
+            nxt = try_extract_param_url(current)
+            if not nxt or nxt == current:
+                break
+            current = nxt
+        return current if current != url else None
 
     def resolve_single(self, url, is_mobile=0):
-        if not self._is_short_url(url):
+        if not self.needs_resolve(url):  # ★ 原来是 _is_short_url
+            return url
+
+        # ① 离线优先：参数式直接解，不耗网络、不触发风控
+        offline = self._try_offline_resolve(url)
+        if offline:
+            if not self.needs_resolve(offline):
+                return offline  # 一步到位
+            url = offline  # 解出的是短链或中转页 → 继续走网络
+
+        # 此时 url 是短链 or 中转页；intermediate 也要走网络（urllib 拿 200 但 URL 不变，Playwright 接手）
+        if not (self._is_short_url(url) or self._is_intermediate_url(url)):
             return url
 
         # 1. 决定 urllib 的 UA
@@ -52,7 +70,7 @@ class LinkResolver:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=5) as response:
                 real_url = response.geturl()
-                # ★ 新增：停在中转页（如 visitor）也算未完成，交给 Playwright
+                # ★ 停在中转页（如 visitor）也算未完成，交给 Playwright
                 if real_url and not self._is_unresolved(real_url):
                     return real_url
         except Exception:
@@ -62,21 +80,24 @@ class LinkResolver:
         if self.bm:
             def _do_browser_resolve():
                 context = None
+                cleanup = None
                 try:
                     self.bm._ensure_started_impl()
                     global_limiter.wait()
 
+                    page = None
                     if is_mobile:
-                        context = self.bm._browser.new_context(
-                            user_agent=ua,
-                            viewport={"width": 390, "height": 844},
-                            is_mobile=True,
-                            has_touch=True
-                        )
+                        # ★ 真移动：新 context + is_mobile + has_touch + MOBILE_UA
+                        page, cleanup = self.bm.open_isolated_mobile_page()
                     else:
                         context = self.bm._browser.new_context(user_agent=ua)
+                        page = context.new_page()
 
-                    page = context.new_page()
+                        def cleanup():
+                            try:
+                                context.close()
+                            except Exception as e:
+                                print(f"关闭 context 失败: {e}")
 
                     # ★ 一阶段核心：等待 URL 发生变化（既不是短链，也不是中转页）
                     try:
@@ -91,23 +112,25 @@ class LinkResolver:
                         return page.url
 
                     except Exception as wait_err:
-                        # 如果是等超时了（死链），或者页面崩了，就直接放弃，不拟人等待
-                        # print(f"⏳ [一阶段] URL未发生变化或超时: {wait_err}")
+                        # 等超时了（死链），或者页面崩了，直接放弃，不拟人等待
                         return url
                     finally:
-                        if context:
-                            context.close()
+                        if cleanup:
+                            cleanup()
 
                 except Exception as e:
                     print(f"⚠️ Playwright 解析异常: {e}")
                     global_limiter.penalize(2.0)
                     if context:
-                        context.close()
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
                     return url
 
             try:
                 real_url = self.bm.run_in_browser_thread(_do_browser_resolve)
-                # ★ 新增：Playwright 结果同样要排除中转页
+                # ★ Playwright 结果同样要排除中转页
                 if real_url and not self._is_unresolved(real_url):
                     return real_url
             except Exception as e:
@@ -125,6 +148,7 @@ class LinkResolver:
 
         def _do_browser_resolve():
             context = None
+            cleanup = None
             try:
                 self.bm._ensure_started_impl()
                 global_limiter.wait()
@@ -138,17 +162,18 @@ class LinkResolver:
                 print(f"🔍 [二阶段·诊断] base_url = {(strategy or {}).get('base_url')!r}")
 
                 ua = MOBILE_UA if is_mobile else DESKTOP_UA
+                page = None
                 if is_mobile:
-                    context = self.bm._browser.new_context(
-                        user_agent=ua,
-                        viewport={"width": 390, "height": 844},
-                        is_mobile=True,
-                        has_touch=True
-                    )
+                    page, cleanup = self.bm.open_isolated_mobile_page()
                 else:
                     context = self.bm._browser.new_context(user_agent=ua)
+                    page = context.new_page()
 
-                page = context.new_page()
+                    def cleanup():
+                        try:
+                            context.close()
+                        except Exception as e:
+                            print(f"关闭 context 失败: {e}")
 
                 print(f"🔍 [二阶段] 正在进入详情页: {detail_url}")
 
@@ -220,14 +245,17 @@ class LinkResolver:
                     print(f"⚠️ [二阶段] 页面解析或等待超时: {wait_err}")
                     return None
                 finally:
-                    if context:
-                        context.close()
+                    if cleanup:
+                        cleanup()
 
             except Exception as e:
                 print(f"⚠️ [二阶段] Playwright 解析异常: {e}")
                 global_limiter.penalize(2.0)
                 if context:
-                    context.close()
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
                 return None
 
         # ★★★ 这段就是之前漏掉的，必须补回来 ★★★
@@ -243,6 +271,6 @@ class LinkResolver:
         print(f"🔗 [UrlResolver] 开始解析 {len(links)} 条短链...")
         for link in links:
             original_url = link.get("url", "")
-            if self._is_short_url(original_url):
+            if self.needs_resolve(original_url):
                 link["url"] = self.resolve_single(original_url, link.get("is_mobile", 0))
         return links

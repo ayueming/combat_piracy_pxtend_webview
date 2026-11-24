@@ -34,7 +34,7 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "V3.6.2"
+VERSION = "V3.7.1"
 
 
 # ==========================================

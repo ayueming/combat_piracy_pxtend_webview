@@ -115,8 +115,7 @@ class SearchConsolePage(QWidget):
         main_layout.addWidget(self.result_panel, 1)
 
     def _on_stats_updated(self, stats):
-        # 转发给输入面板更新重试按钮
-        self.input_panel.update_parse_state(stats)
+        pass
 
     def _on_request_preview(self, db_id, raw_url, category, book_name, is_mobile=0):
         if not raw_url:

@@ -14,7 +14,7 @@ def _extract_url_fingerprint(url):
 
 
 def extract_chapters(soup, base_url, book_name, base_cat,
-                     src_name, source_id, seen_codes):
+                     src_name, source_id, seen_codes, is_mobile=0):
     """从 BeautifulSoup 文档中提取章节/简介链接（指纹强过滤版）"""
     chapter_found = 0
     intro_found = 0
@@ -74,6 +74,7 @@ def extract_chapters(soup, base_url, book_name, base_cat,
             "name": src_name,
             "attr": attr_text,
             "source_id": source_id,
+            "is_mobile": int(bool(is_mobile)),
         })
 
     return chapter_found, intro_found, results

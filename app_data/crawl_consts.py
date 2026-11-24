@@ -3,6 +3,8 @@
 抓取和解析相关参数配置
 """
 
+import re
+
 # 最大抓取页数
 CRAWL_MAX_PAGES = 3
 
@@ -32,3 +34,63 @@ SHORT_URL_PATTERNS = [
 INTERMEDIATE_URL_PATTERNS = [
     r"visitor\.passport\.weibo\.cn",   # 微博 visitor 中转页（200 + JS 跳转）
 ]
+
+
+def is_short_url(url: str) -> bool:
+    """命中短链规则即视为短链。规则与 SHORT_URL_PATTERNS 共用一份数据源。"""
+    if not url:
+        return False
+    return any(re.search(p, url) for p in SHORT_URL_PATTERNS)
+
+
+def is_intermediate_url(url: str) -> bool:
+    """命中中转页规则即视为中转页（跳转未完成）。"""
+    if not url:
+        return False
+    return any(re.search(p, url) for p in INTERMEDIATE_URL_PATTERNS)
+
+
+# ====== 参数式中转链接（真实 URL 编码在 query 里，纯离线可解，无需网络）======
+# {host+path 片段（小写子串）: 参数名}
+PARAM_INTERMEDIATE_RULES = {
+    "weibo.cn/sinaurl":  "u",
+    "weibo.com/sinaurl": "u",
+}
+
+def is_param_intermediate_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.lower()
+    return any(host in u for host in PARAM_INTERMEDIATE_RULES)
+
+def try_extract_param_url(url: str):
+    """从参数式中转 URL 里解出真实 URL。纯字符串操作，无网络。失败返回 None。"""
+    from urllib.parse import urlparse, unquote
+    u = url or ""
+    u_lower = u.lower()
+
+    # 1. 先按 host 规则找到对应参数名，避免误伤任意 ?u= 的普通 URL
+    param_name = None
+    for host, pname in PARAM_INTERMEDIATE_RULES.items():
+        if host in u_lower:
+            param_name = pname
+            break
+    if not param_name:
+        return None
+
+    query = urlparse(u).query
+    if not query:
+        return None
+
+    # 2. 手动 split('&')，不用 parse_qs——后者会把 '+' 解成空格，base64 场景会踩坑
+    for part in query.split("&"):
+        k, _, v = part.partition("=")
+        if unquote(k) != param_name:
+            continue
+        real = unquote(v)
+        # 3. 协议白名单，防 javascript:/data:/file:
+        if not real.lower().startswith(("http://", "https://")):
+            return None
+        return real
+    return None
+

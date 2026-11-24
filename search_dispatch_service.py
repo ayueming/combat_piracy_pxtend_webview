@@ -82,6 +82,16 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None,
     ws_signals.scan_state_changed.emit("scanning")
 
     def _on_timeout():
+        print(f"⏱️ [Dispatch] 任务超时，关闭 tab 中断 Playwright")
+        try:
+            from browser_cdp_control import close_search_tabs
+            close_search_tabs()
+        except Exception:
+            pass
+        try:
+            app_state.set_mode("idle")
+        except Exception:
+            pass
         ws_signals.scan_state_changed.emit("idle")
 
     app_state.busy_begin(task["task_id"], timeout_sec=300, on_timeout=_on_timeout)
@@ -136,8 +146,19 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None,
 
         except Exception as e:
             print(f"❌ [Playwright] 任务执行崩溃: {e}")
-            app_state.busy_end("playwright_error")
-            app_state.set_mode("idle")
+            try:
+                from browser_cdp_control import close_search_tabs
+                close_search_tabs()
+            except Exception:
+                pass
+            try:
+                app_state.busy_end("playwright_error")
+            except Exception:
+                pass
+            try:
+                app_state.set_mode("idle")
+            except Exception:
+                pass
             ws_signals.search_finished.emit(f"ERROR_{task['batch_id']}")
             ws_signals.scan_state_changed.emit("idle")
 

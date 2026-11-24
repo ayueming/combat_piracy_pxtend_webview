@@ -81,6 +81,11 @@ class AppState:
                 with self._lock:
                     self._active_tasks.pop(task_id, None)
                 self.busy_end("timeout")
+                # ★ 兜底：不管 on_timeout 是否正常执行，mode 必回 idle
+                try:
+                    self.set_mode("idle")
+                except Exception:
+                    pass
                 if on_timeout:
                     try:
                         on_timeout()

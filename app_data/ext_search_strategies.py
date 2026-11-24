@@ -112,6 +112,21 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": []
         }
     },
+    "uc搜索": {
+        "mode": "click_append",                      # ★ 新模式
+        "scanner": "generic",
+        "resultSelector": "#main .sc",
+        "titleSelector": ".qk-title-content a",
+        "bodySelector": ".qk-paragraph-text",
+        "sourceSelector": ".qk-source-item",
+        "nextBtnSelector": "#pager",                 # ★ 固定 id，最简单；禁用态在代码里判
+        "urlExtract": {
+            "rules": [
+                {"selector": ".qk-title-content a", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        }
+    },
     # ★ 新增：爱网盘（盘站搜索）
     "爱网盘": {
         "mode": "click",

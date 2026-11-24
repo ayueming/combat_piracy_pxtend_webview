@@ -12,12 +12,12 @@ SEARCH_PLATFORM_PRIORITY = [
     "百度搜索(pc)",
     "百度搜索(移动)",
     "夸克搜索",
+    "uc搜索",
     "百度知道",
     "百度贴吧",
     '爱网盘',
     '爱搜',
     '影盘社'
-    # "uc搜索",  还没开发，先注释掉
 ]
 
 SEARCH_TEMPLATES = {
@@ -61,6 +61,14 @@ SEARCH_TEMPLATES = {
         "is_mobile": False,
         "note": "",
     },
+    "uc搜索": {
+        "template": "https://so.m.sm.cn/s?q={kw}&from=ucframe&uc_sm=1",
+        "mode": "direct",
+        "exact_support": "none",
+        "real_platform": "uc搜索",
+        "is_mobile": True,
+        "note": "神马搜索"
+    },
     "爱网盘": {
         "template": "https://iwangpan.cc/search?q={kw}&exact=true",
         "mode": "direct",
@@ -93,14 +101,6 @@ SEARCH_TEMPLATES = {
         "is_mobile": False,
         "note": "微博综合搜索",
     },
-    # "uc搜索": {
-        # "template": "https://so.m.sm.cn/s?q={kw}",
-        # "mode": "direct",
-        # "exact_support": "none",
-        # "real_platform": "uc搜索",
-        # "is_mobile": False,
-        # "note": "神马搜索",
-    # },
     # "短剧搜": {
         # "template": "https://www.duanjuso.cc/search?q={kw}",
         # "mode": "direct",

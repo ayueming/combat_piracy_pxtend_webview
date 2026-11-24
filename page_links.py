@@ -11,7 +11,10 @@ from PySide6.QtCore import (
     Qt, QSettings, QItemSelectionModel, QEvent, QTimer,
     QObject, Signal, QRunnable, QThreadPool,
 )
-from PySide6.QtGui import QColor, QFont, QStandardItemModel, QStandardItem, QPainter, QBrush
+from PySide6.QtGui import (
+    QColor, QFont, QStandardItemModel, QStandardItem,
+    QPainter, QBrush, QPalette,
+)
 
 from link_resolver import is_short_url
 
@@ -52,23 +55,32 @@ from ui_styles import (
 
 from app_signals import signals
 
-# ★ 列索引
-COL_CHK = 0
-COL_BOOK = 1
-COL_CAT = 2
-COL_URL = 3
-COL_PUBLISHER = 4  # 网站域名（来源名，可编辑）
-COL_ATTR = 5  # 属性（手动获取/机器人获取）
-COL_CODE = 6
-COL_CRAWL_STATUS = 7
-COL_COMP_TIME = 8
-COL_RES_STATUS = 9
-COL_TITLE = 10  # 标题（只读）
+from app_data.link_columns import (
+    COL_CHK, COL_BOOK, COL_CAT, COL_URL, COL_PUBLISHER,
+    COL_ATTR, COL_CODE, COL_CRAWL_STATUS, COL_PICKER_STATUS,
+    COL_COMP_TIME, COL_RES_STATUS, COL_TITLE,
+)
+
 
 TABLE_HEADERS = [
     "勾选", "关联作品(必填)", "资源分类(必填)", "资源链接(必填)", "网站域名",
-    "属性", "特征码", "抓取状态", "投诉时间", "资源状态", "标题",
+    "属性", "特征码", "抓取状态", "拾取状态", "投诉时间", "资源状态", "标题",
 ]
+
+
+class KeepForegroundDelegate(QStyledItemDelegate):
+    """选中状态下仍保留 item 自定义前景色（如重复链标红），不被 HighlightedText 覆盖。"""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if not (option.state & QStyle.State_Selected):
+            return
+        fg = index.data(Qt.ForegroundRole)
+        if fg is None:
+            return
+        color = fg.color() if isinstance(fg, QBrush) else fg
+        if color.isValid():
+            option.palette.setColor(QPalette.HighlightedText, color)
 
 
 class LinksTableView(QTableView):
@@ -449,6 +461,7 @@ class LinksPage(QWidget):
         self.table.setColumnWidth(COL_ATTR, 100)
         self.table.setColumnWidth(COL_CODE, 120)
         self.table.setColumnWidth(COL_CRAWL_STATUS, 100)
+        self.table.setColumnWidth(COL_PICKER_STATUS, 100)
         self.table.setColumnWidth(COL_COMP_TIME, 120)
         self.table.setColumnWidth(COL_RES_STATUS, 100)
         self.table.setColumnWidth(COL_TITLE, 250)
@@ -463,6 +476,7 @@ class LinksPage(QWidget):
             parent=self.table,
         ))
         self.table.setItemDelegateForColumn(COL_RES_STATUS, StatusComboDelegate(self.table))
+        self.table.setItemDelegateForColumn(COL_URL, KeepForegroundDelegate(self.table))
 
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -607,7 +621,7 @@ class LinksPage(QWidget):
             for row_idx, r in enumerate(sorted(list(checked_rows)), start=2):
                 book_name = self.model.item(r, COL_BOOK).text().strip()
                 cat = self.model.item(r, COL_CAT).text().strip()
-                url = self.model.item(r, COL_URL).text().replace(" (重复资源链接)", "").strip()
+                url = self.model.item(r, COL_URL).text().strip()
                 publisher = self.model.item(r, COL_PUBLISHER).text().strip()
                 attr = self.model.item(r, COL_ATTR).text().strip()
                 comp_time = self.model.item(r, COL_COMP_TIME).text().strip()
@@ -744,8 +758,6 @@ class LinksPage(QWidget):
             conn.close()
 
             if is_duplicate:
-                base_url = raw_url.replace(" (重复资源链接)", "")
-                item.setText(f"{base_url} (重复资源链接)")
                 item.setForeground(QColor("red"))
                 item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
             else:
@@ -782,7 +794,7 @@ class LinksPage(QWidget):
             return
 
         # ★ 去掉可能携带的后缀，用纯 URL 判断
-        url = (url or "").replace(" (重复资源链接)", "").strip()
+        url = (url or "").strip()
 
         if not url or not is_short_url(url):
             # 非短链：清掉可能残留的黄色（静默，不触发 itemChanged）
@@ -908,13 +920,14 @@ class LinksPage(QWidget):
         db_id = self.model.item(row, COL_CHK).data(Qt.UserRole)
         book_name = self.model.item(row, COL_BOOK).text().strip()
         cat = self.model.item(row, COL_CAT).text().strip()
-        url = self.model.item(row, COL_URL).text().replace(" (重复资源链接)", "").strip()
+        url = self.model.item(row, COL_URL).text().strip()
         name = self.model.item(row, COL_TITLE).text().strip()  # 标题 → sites.original_title
         source_name = self.model.item(row, COL_PUBLISHER).text().strip()  # 网站域名 → sites.name
         attr = self.model.item(row, COL_ATTR).text().strip()
 
         code = self.model.item(row, COL_CODE).text().strip()
         crawl_status = self.model.item(row, COL_CRAWL_STATUS).text().strip()
+        picker_status = self.model.item(row, COL_PICKER_STATUS).text().strip()
         comp_time = self.model.item(row, COL_COMP_TIME).text().strip()
         display_status = self.model.item(row, COL_RES_STATUS).text().strip()
 
@@ -946,11 +959,12 @@ class LinksPage(QWidget):
         try:
             if not db_id:
                 cursor.execute('''INSERT INTO sites
-                                  (category, target_platform, site_url, name, attr, feature_code, complaint_time,
-                                   resource_status, book_id, book_name, crawl_status)
-                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                  (category, target_platform, site_url, name, attr, feature_code,
+                                   complaint_time, resource_status, book_id, book_name,
+                                   crawl_status, picker_status)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                                (cat, cat, url, source_name, attr, code, comp_time, res_status,
-                                book_id, book_name, crawl_status))
+                                book_id, book_name, crawl_status, picker_status))
                 conn.commit()
                 self.model.item(row, COL_CHK).setData(str(cursor.lastrowid), Qt.UserRole)
             else:
@@ -965,10 +979,11 @@ class LinksPage(QWidget):
                                       resource_status=?,
                                       book_id=?,
                                       book_name=?,
-                                      crawl_status=?
+                                      crawl_status=?,
+                                      picker_status=?
                                   WHERE id = ?''',
                                (cat, cat, url, source_name, attr, code, comp_time, res_status,
-                                book_id, book_name, crawl_status, db_id))
+                                book_id, book_name, crawl_status, picker_status, db_id))
                 conn.commit()
         except sqlite3.IntegrityError:
             pass
@@ -1015,7 +1030,8 @@ class LinksPage(QWidget):
 
         # ★ 第 4 位 sites.name（网站域名），第 12 位 sites.original_title（标题）
         query_base = ("SELECT id, target_platform, site_url, name, attr, feature_code, "
-                      "complaint_time, resource_status, book_id, book_name, crawl_status, original_title FROM sites")
+                      "complaint_time, resource_status, book_id, book_name, crawl_status, "
+                      "picker_status, original_title FROM sites")
 
         if target_cats == ["全部资源"]:
             records = cursor.execute(f"{query_base} ORDER BY id ASC").fetchall()
@@ -1030,7 +1046,7 @@ class LinksPage(QWidget):
 
         for row_data in records:
             (db_id, cat, url, source_name, attr, code, comp_time, res_status,
-             b_id, b_name, crawl_status, title) = row_data
+             b_id, b_name, crawl_status, picker_status, title) = row_data
 
             book_display = ""
             if b_id:
@@ -1058,7 +1074,6 @@ class LinksPage(QWidget):
             item_attr = QStandardItem(attr or "")
 
             if feature_counts.get(code, 0) > 1:
-                url_item.setText(f"{url} (重复资源链接)")
                 url_item.setForeground(QColor("red"))
                 url_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
 
@@ -1074,8 +1089,12 @@ class LinksPage(QWidget):
 
             self.model.appendRow([
                 chk_item, item_book, item_cat, url_item, item_publisher,
-                item_attr, QStandardItem(code or ""), QStandardItem(crawl_status or ""),
-                QStandardItem(comp_time or ""), item_res_status, item_title,
+                item_attr,
+                QStandardItem(code or ""),
+                QStandardItem(crawl_status or ""),
+                QStandardItem(picker_status or ""),
+                QStandardItem(comp_time or ""),
+                item_res_status, item_title,
             ])
 
             # ★ 黄色由 update_row_style 统一判断（基于 _declined_short_urls）
@@ -1115,7 +1134,6 @@ class LinksPage(QWidget):
             url_text = record.get("site_url") or ""
             url_item = QStandardItem(url_text)
             if duplicate:
-                url_item.setText(f"{url_text} (重复资源链接)")
                 url_item.setForeground(QColor("red"))
                 url_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
 
@@ -1136,6 +1154,7 @@ class LinksPage(QWidget):
                 QStandardItem(record.get("attr") or ""),
                 QStandardItem(record.get("feature_code") or ""),
                 QStandardItem(record.get("crawl_status") or ""),
+                QStandardItem(record.get("picker_status") or ""),
                 QStandardItem(record.get("complaint_time") or ""),
                 QStandardItem(record.get("resource_status") or ""),
                 item_title,

@@ -63,7 +63,6 @@ def build_picker_js(ctx: dict) -> str:
                 .btn-ua-toggle:hover {{ background: #eaeef2; }}
                 .btn-save-batch {{ background: #10B981; color: #fff; margin-top: 4px; }}
                 .btn-save-batch:hover {{ background: #059669; }}
-                .status {{ padding: 6px 10px; background: #f6f8fa; color: #57606a; font-size: 11px; }}
             `;
             shadow.appendChild(style);
 
@@ -80,9 +79,8 @@ def build_picker_js(ctx: dict) -> str:
                     <button class="btn-save-page" id="btn-save-page">仅保存当前网址</button>
                     <button class="btn-pick" id="btn-pick">手动拾取链接（或按住ALT）</button>
                     <button class="btn-ua-toggle" id="btn-ua-toggle"></button>
-                    <button class="btn-save-batch" id="btn-save-batch">💾 解析本次拾取</button>
+                    <button class="btn-save-batch" id="btn-save-batch">解析本次拾取</button>
                 </div>
-                <div class="status">待保存 <b id="apt-count">0</b> 条</div>
             `;
             shadow.appendChild(panel);
 
@@ -138,18 +136,6 @@ def build_picker_js(ctx: dict) -> str:
             const btnSavePage = shadow.getElementById("btn-save-page");
             const btnSaveBatch = shadow.getElementById("btn-save-batch");
             const btnUAToggle = shadow.getElementById("btn-ua-toggle");
-            const countEl = shadow.getElementById("apt-count");
-
-            // ★ 核心修改：向 Python 请求真实的数据库 Pending 数量
-            function refreshPendingCount() {{
-                if (window.pyBridge) {{
-                    window.pyBridge.get_pending_count(function(count) {{
-                        countEl.textContent = count;
-                    }});
-                }}
-            }}
-            // 注入时拉取一次（翻页后重新注入也能拿到全库真实数据）
-            refreshPendingCount();
 
             function enterPicking() {{
                 isPicking = true; btnPick.classList.add("active");
@@ -217,7 +203,6 @@ def build_picker_js(ctx: dict) -> str:
                 if (window.pyBridge) {{
                     window.pyBridge.manual_pick(finalUrl, titleText, bodyText, selBook.value, selCat.value);
                     // ★ 拾取后，向 Python 询问最新的数量
-                    setTimeout(refreshPendingCount, 300);
                 }}
             }}, true);
 
@@ -225,7 +210,6 @@ def build_picker_js(ctx: dict) -> str:
                 if (window.pyBridge) {{
                     window.pyBridge.save_page(window.location.href, document.title, document.body.innerText.substring(0, 500), selBook.value, selCat.value);
                     // ★ 仅保存当前网址后，数量也会增加，刷新一下
-                    setTimeout(refreshPendingCount, 300);
                 }}
             }});
 
@@ -233,13 +217,12 @@ def build_picker_js(ctx: dict) -> str:
                 if (window.pyBridge) {{
                     window.pyBridge.save_batch(ctx.batch_id);
                     // ★ 保存后，数量会归零或减少
-                    setTimeout(refreshPendingCount, 500); 
                 }}
             }});
 
             btnUAToggle.textContent = ctx.is_mobile
-                ? "🖥️ 切换到桌面 UA"
-                : "📱 切换到移动 UA";
+                ? "切换到桌面 UA"
+                : "切换到移动 UA";
             btnUAToggle.addEventListener("click", () => {{
                 if (!window.pyBridge) return;
                 const target = btnUAToggle.textContent.includes("桌面") ? "0" : "1";

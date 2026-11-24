@@ -25,6 +25,7 @@ from ws_server import ws_signals
 from parser_service import parser_signals, trigger_parse
 
 from ui_components import NoWheelComboBox
+from ui_card_base import BaseCard, CARD_STYLES, get_card_status
 
 
 # =========================================================================
@@ -97,316 +98,109 @@ class ToastLabel(QLabel):
 
 
 # =========================================================================
-# 卡片样式
-# =========================================================================
-CARD_STYLES = {
-    "明确资源": {"color": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "border": "4px solid #10B981"},
-    "未知网站": {"color": "#F59E0B", "bg": "#FEF3C7", "text": "#92400E", "border": "4px solid #F59E0B"},
-    "关键词未命中": {"color": "#9CA3AF", "bg": "#F3F4F6", "text": "#374151", "border": "4px solid #9CA3AF"},
-    "待解析": {"color": "#3B82F6", "bg": "#EFF6FF", "text": "#1E3A8A", "border": "4px solid #3B82F6"},
-    "解析失败": {"color": "#4B5563", "bg": "#F9FAFB", "text": "#374151", "border": "4px solid #4B5563"},
-    "已在库": {"color": "#047857", "bg": "#ECFDF5", "text": "#064E3B", "border": "4px solid #047857"},
-    "白名单": {"color": "#0EA5E9", "bg": "#F0F9FF", "text": "#0369A1", "border": "4px solid #0EA5E9"},
-    "已永删": {"color": "#991B1B", "bg": "#FEF2F2", "text": "#7F1D1D", "border": "4px solid #991B1B"},
-}
-
-
-def get_card_status(record):
-    crawl_status = record[11] if len(record) > 11 else 0
-    domain_matched = record[12] if len(record) > 12 else 0
-    if crawl_status == CRAWL_STATUS_ORGANIZED:
-        return "明确资源" if domain_matched == 1 else "未知网站"
-    elif crawl_status == CRAWL_STATUS_UNMATCHED:
-        return "关键词未命中"
-    elif crawl_status == CRAWL_STATUS_PENDING:
-        return "待解析"
-    elif crawl_status == CRAWL_STATUS_PARSE_FAILED:
-        return "解析失败"
-    elif crawl_status == CRAWL_STATUS_DUPLICATE:
-        return "已在库"
-    elif crawl_status == CRAWL_STATUS_WHITELIST:
-        return "白名单"
-    elif crawl_status == CRAWL_STATUS_IGNORED:
-        return "已永删"
-    return "未知网站"
-
-
-# =========================================================================
 # 数据卡片
 # =========================================================================
-class DataCard(QFrame):
-    def __init__(self, row_idx, record, mode, parent_panel):
-        super().__init__()
-        self.record = record
-        self.mode = mode
-        self.parent_panel = parent_panel
-        self.db_id = record[0]
-        self.title = record[1] or "无标题"
-        self.body_text = record[2] or ""
-        self.raw_url = record[3] or (record[15] if len(record) > 15 else "") or ""
-        self.book_name = record[4] or ""
-        self.original_category = record[5] or ""
-        self.target_platform = record[6] or ""
-        self.fetch_time = record[7] or ""
-        self.source_site = record[8] if len(record) > 8 else ""
-        self.pick_origin = record[13] if len(record) > 13 else ""
-        self.has_pan = record[14] if len(record) > 14 else 0
-        self.is_mobile = record[17] if len(record) > 17 else 0
-
-        self.status = get_card_status(record)
-        self.is_manual = (self.pick_origin == "手动获取")
-        style = CARD_STYLES.get(self.status, CARD_STYLES["未知网站"])
-
-        self.setObjectName("DataCard")
-        self.setCursor(Qt.ArrowCursor)
-        self.setFixedHeight(185)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        # ★ 修改点 1：这里不要直接 setStyleSheet，而是抽离出一个方法
-        # 初始化时检查是否已经是当前预览的卡片
-        is_active = False
-        if hasattr(parent_panel.main_page, "active_preview_db_id"):
-            is_active = (parent_panel.main_page.active_preview_db_id == self.db_id)
-        self.set_highlight(is_active)
-
-        self.display_url = "⏳ 等待解析真实链接..." if "baidu.com/link?url=" in self.raw_url else self.raw_url
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 10, 15, 10)
-        layout.setSpacing(6)
-
-        # ===== 第一行：标签、时间 =====
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(6)  # 控制三个标签之间的横向距离
-
-        # 1. 主状态标签（明确资源、未知网站等）
-        lbl_status = QLabel(self.status)
-        lbl_status.setStyleSheet(
-            f"background: {style['bg']}; color: {style['text']}; "
-            f"padding: 0px 4px; margin: 0px; "
-            f"border-radius: 3px; font-size: 12px; font-weight: bold; border: none;"
-        )
-        lbl_status.setFixedHeight(22)  # 强制高度 18
-        lbl_status.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)  # 只包裹文字
-        top_row.addWidget(lbl_status)
-
-        # 2. 手动拾取标签
-        if self.is_manual:
-            lbl_manual = QLabel("📌 手动拾取")
-            lbl_manual.setStyleSheet(
-                "background: #FDF4FF; color: #C026D3; border: 1px solid #F0ABFC; "
-                "padding: 0px 4px; margin: 0px; border-radius: 3px; font-size: 12px; font-weight: bold;"
-            )
-            lbl_manual.setFixedHeight(22)  # 强制高度 18，和主状态齐平
-            lbl_manual.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            top_row.addWidget(lbl_manual)
-
-        # 3. 含网盘标签
-        if self.has_pan:
-            lbl_pan = QLabel("📦 含网盘")
-            lbl_pan.setStyleSheet(
-                "background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; "
-                "padding: 0px 4px; margin: 0px; border-radius: 3px; font-size: 12px; font-weight: bold;"
-            )
-            lbl_pan.setFixedHeight(22)  # 强制高度 18，和主状态齐平
-            lbl_pan.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            top_row.addWidget(lbl_pan)
-
-        top_row.addStretch()
-        lbl_time = QLabel(self.fetch_time)
-        lbl_time.setStyleSheet("color: #9CA3AF; font-size: 12px; border: none;")
-        top_row.addWidget(lbl_time)
-        layout.addLayout(top_row)
-
-        # ===== 第二行：标题 =====
-        lbl_title = QLabel(self.title)
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #111827; border: none;")
-        lbl_title.setWordWrap(False)
-        lbl_title.setToolTip(self.title)
-        lbl_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lbl_title.setFixedHeight(24)
-        layout.addWidget(lbl_title)
-
-        # ===== 第三行：正文 =====
-        if self.body_text:
-            # ★ 修改 1：直接使用完整的原始文本，不做任何截断
-            lbl_body = QLabel(self.body_text)
-            lbl_body.setStyleSheet("color: #4B5563; font-size: 13px; border: none;")
-            lbl_body.setWordWrap(True)
-            lbl_body.setToolTip(self.body_text)  # 鼠标悬浮依然可以看全部
-            lbl_body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-
-            # ★ 修改 2：固定高度为 40（刚好容纳两行字）
-            lbl_body.setFixedHeight(40)
-            # ★ 修改 3：强制文字从顶部开始对齐
-            # 这样如果文字很多排成了三行，第三行会超出 40 的高度，直接被裁掉不显示
-            # 并且保证绝对不会有任何一行挤压重叠
-            lbl_body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-
-            layout.addWidget(lbl_body)
-        else:
-            lbl_empty_body = QLabel("")
-            lbl_empty_body.setFixedHeight(40)
-            layout.addWidget(lbl_empty_body)
-
-        # ===== 第四行：链接 =====
-        display_text = self.display_url
-        if len(display_text) > 65:
-            display_text = display_text[:62] + "..."
-        lbl_url = QLabel(display_text)
-        lbl_url.setStyleSheet("color: #2563EB; font-size: 12px; border: none;")
-        lbl_url.setToolTip("双击跳转预览：" + self.raw_url)
-        lbl_url.setCursor(Qt.PointingHandCursor)
-        lbl_url.setFixedHeight(20)
-        lbl_url.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lbl_url.mouseDoubleClickEvent = lambda e: self.parent_panel._preview_card_url(
-            self.db_id, self.raw_url, self.original_category, self.book_name, self.is_mobile
-        )
-        layout.addWidget(lbl_url)
-
-        # ===== 第五行：底部操作区 =====
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(8)
-
-        src_text = self.source_site if self.source_site else "未知来源"
-        lbl_src = QLabel(src_text)
-        if len(src_text) > 12:
-            lbl_src.setText(src_text[:12] + "...")
-        lbl_src.setStyleSheet("color: #9CA3AF; font-size: 12px; border: none;")
-        lbl_src.setToolTip(f"来源: {src_text}")
-        lbl_src.setMaximumWidth(140)
-        bottom_row.addWidget(lbl_src)
-
-        bottom_row.addStretch()
-
+class DataCard(BaseCard):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ★ 统一改为两行后，需要更高的空间
         if self.mode == "actionable":
-            self.combo_book = NoWheelComboBox()
-            self.combo_book.setStyleSheet(
-                "QComboBox { padding: 2px 5px; border: 1px solid #DCDCDC; border-radius: 4px; font-size: 12px; background: #FFF; }")
-            self.combo_book.setMaximumWidth(140)
+            self.setFixedHeight(185)
 
-            books = [b["name"] for b in self.parent_panel.books_data.values()]
-            if self.book_name and self.book_name not in books:
-                self.combo_book.addItem(self.book_name)
-            self.combo_book.addItems(books)
+    def build_top_right_widgets(self):
+        if self.mode != "actionable":
+            return None
 
-            if self.book_name:
-                self.combo_book.setCurrentText(self.book_name)
-            elif books:
-                self.combo_book.setCurrentIndex(0)
+        widgets = []
 
-            self.combo_book.currentTextChanged.connect(self._on_book_changed)
-            bottom_row.addWidget(self.combo_book)
+        # 关联作品下拉框（保持原样）
+        self.combo_book = NoWheelComboBox()
+        self.combo_book.setStyleSheet(
+            "QComboBox { padding: 1px 4px; border: 1px solid #DCDCDC; border-radius: 4px; "
+            "font-size: 12px; background: #FFF; font-weight: bold;}")
+        self.combo_book.setFixedSize(140, 24)
 
-            self.combo_cat = NoWheelComboBox()
-            self.combo_cat.setStyleSheet(
-                "QComboBox { padding: 2px 5px; border: 1px solid #DCDCDC; border-radius: 4px; font-size: 12px; background: #FFF; font-weight: bold; color: #059669; }")
-            self.combo_cat.setMaximumWidth(120)
-            cur_cat = self.original_category or "其他"
-            candidates = [cur_cat] + list(ALL_SUB_PLATFORMS)
-            seen = set()
-            for opt in candidates:
-                if opt in seen:
-                    continue
-                seen.add(opt)
-                self.combo_cat.addItem(opt, f"keep:{opt}")
-            idx = self.combo_cat.findData(f"keep:{cur_cat}")
-            self.combo_cat.setCurrentIndex(idx if idx != -1 else 0)
-            bottom_row.addWidget(self.combo_cat)
+        books = [b["name"] for b in self.parent_panel.books_data.values()]
+        if self.book_name and self.book_name not in books:
+            self.combo_book.addItem(self.book_name)
+        self.combo_book.addItems(books)
+        if self.book_name:
+            self.combo_book.setCurrentText(self.book_name)
+        elif books:
+            self.combo_book.setCurrentIndex(0)
+        self.combo_book.currentTextChanged.connect(self._on_book_changed)
+        widgets.append(self.combo_book)
+
+        return widgets
+
+    def build_action_left_widgets(self):
+        if self.mode != "actionable":
+            return None
+
+        widgets = []
+
+        # 分类下拉框（原样搬运，仅是挂载位置变了）
+        self.combo_cat = NoWheelComboBox()
+        self.combo_cat.setStyleSheet(
+            "QComboBox { padding: 1px 4px; border: 1px solid #DCDCDC; border-radius: 4px; "
+            "font-size: 12px; background: #FFF; font-weight: bold; color: #059669; }")
+        self.combo_cat.setFixedSize(75, 24)
+
+        cur_cat = self.original_category or "其他"
+        candidates = [cur_cat] + list(ALL_SUB_PLATFORMS)
+        seen = set()
+        for opt in candidates:
+            if opt in seen:
+                continue
+            seen.add(opt)
+            self.combo_cat.addItem(opt, f"keep:{opt}")
+        idx = self.combo_cat.findData(f"keep:{cur_cat}")
+        self.combo_cat.setCurrentIndex(idx if idx != -1 else 0)
+        widgets.append(self.combo_cat)
+
+        return widgets
+
+    def build_action_widgets(self):
+        if self.mode == "actionable":
+            row1 = QHBoxLayout()
+            row1.setSpacing(8)
 
             btn_ok = QPushButton("入库")
             btn_ok.setStyleSheet(
-                "background: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; border-radius: 4px; padding: 3px 10px; font-size: 12px;")
+                "background: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; "
+                "border-radius: 4px; padding: 3px 10px; font-size: 12px;")
             btn_ok.setCursor(Qt.PointingHandCursor)
-            # ★ 修复：把 self 传给 parent_panel._card_action
             btn_ok.clicked.connect(
-                lambda: self.parent_panel._card_action(self, self.db_id, self.combo_cat.currentData(), "keep"))
+                lambda: self.parent_panel._card_action(
+                    self, self.db_id, self.combo_cat.currentData(), "keep"))
 
             btn_black = QPushButton("永删")
             btn_black.setStyleSheet(
-                "background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; border-radius: 4px; padding: 3px 10px; font-size: 12px;")
+                "background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; "
+                "border-radius: 4px; padding: 3px 10px; font-size: 12px;")
             btn_black.setCursor(Qt.PointingHandCursor)
-            btn_black.clicked.connect(lambda: self.parent_panel._card_action(self, self.db_id, "", "black"))
+            btn_black.clicked.connect(
+                lambda: self.parent_panel._card_action(self, self.db_id, "", "black"))
 
             btn_drop = QPushButton("忽略")
             btn_drop.setStyleSheet(
-                "background: #F9FAFB; color: #6B7280; border: 1px solid #E5E7EB; border-radius: 4px; padding: 3px 10px; font-size: 12px;")
+                "background: #F9FAFB; color: #6B7280; border: 1px solid #E5E7EB; "
+                "border-radius: 4px; padding: 3px 10px; font-size: 12px;")
             btn_drop.setCursor(Qt.PointingHandCursor)
-            btn_drop.clicked.connect(lambda: self.parent_panel._card_action(self, self.db_id, "", "drop"))
+            btn_drop.clicked.connect(
+                lambda: self.parent_panel._card_action(self, self.db_id, "", "drop"))
 
-            bottom_row.addWidget(btn_ok)
-            bottom_row.addWidget(btn_black)
-            bottom_row.addWidget(btn_drop)
-        else:
-            lbl_cat = QLabel(f"分类: {self.original_category or '无'}")
-            lbl_cat.setStyleSheet("color: #4B5563; font-weight: bold; border: none;")
-            bottom_row.addWidget(lbl_cat)
+            row1.addWidget(btn_ok)
+            row1.addWidget(btn_black)
+            row1.addWidget(btn_drop)
+            return row1
 
-        layout.addLayout(bottom_row)
-
-    # ★ 新增：动态切换底色
-    def set_highlight(self, is_active):
-        style = CARD_STYLES.get(self.status, CARD_STYLES["未知网站"])
-
-        # 让 QSS 用 [active="true"] 区分"选中"
-        self.setProperty("active", "true" if is_active else "false")
-
-        self.setStyleSheet(
-            f"#DataCard {{"
-            f"  background-color: #FFFFFF;"
-            f"  border: 2px solid #E5E7EB;"
-            f"  border-left: {style['border']};"
-            f"  border-radius: 6px;"
-            f"}}"
-            f"#DataCard:hover {{"
-            f"  border: 2px solid #93C5FD;"
-            f"  border-left: {style['border']};"
-            f"}}"
-            f"#DataCard[active=\"true\"] {{"
-            f"  background-color: #EFF6FF;"
-            f"}}"
-        )
-
-        # 动态属性变更后必须重新 polish，否则 [active] 选择器不生效
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    # ★ 新增：平滑折叠消失动画
-    def smooth_disappear(self):
-        # 1. 锁死当前高度
-        self.setMinimumHeight(0)
-        self.setMaximumHeight(self.height())
-
-        # （★ 删除了隐藏子控件的逻辑，让内容随高度自然裁剪）
-
-        # 2. 高度从 185 缩到 0
-        self.anim_height = QPropertyAnimation(self, b"maximumHeight")
-        self.anim_height.setDuration(300)
-        self.anim_height.setStartValue(self.height())
-        self.anim_height.setEndValue(0)
-        self.anim_height.setEasingCurve(QEasingCurve.OutQuad)
-
-        # 3. 透明度从 1 到 0
-        if not self.graphicsEffect():
-            self.opacity_effect = QGraphicsOpacityEffect(self)
-            self.setGraphicsEffect(self.opacity_effect)
-        else:
-            self.opacity_effect = self.graphicsEffect()
-
-        self.anim_opacity = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.anim_opacity.setDuration(300)
-        self.anim_opacity.setStartValue(1.0)
-        self.anim_opacity.setEndValue(0.0)
-
-        # 4. 并行执行
-        self.anim_group = QParallelAnimationGroup(self)
-        self.anim_group.addAnimation(self.anim_height)
-        self.anim_group.addAnimation(self.anim_opacity)
-
-        # 5. 动画结束销毁自己
-        self.anim_group.finished.connect(self.deleteLater)
-        self.anim_group.start()
+        # readonly：底部只显示分类文本
+        row = QHBoxLayout()
+        lbl_cat = QLabel(f"分类: {self.original_category or '无'}")
+        lbl_cat.setStyleSheet("color: #4B5563; font-weight: bold; border: none;")
+        row.addWidget(lbl_cat)
+        return row
 
     def _on_book_changed(self, new_book_name):
         change_draft_book(self.db_id, new_book_name)
@@ -541,7 +335,7 @@ class CardListWidget(QWidget):
             anim_height = QPropertyAnimation(card, b"maximumHeight")
             anim_height.setDuration(400)
             anim_height.setStartValue(1)
-            anim_height.setEndValue(185)
+            anim_height.setEndValue(card.height()) # ★ 原来是 185，现在动态读取
             anim_height.setEasingCurve(QEasingCurve.OutCubic)
 
             anim_opacity = QPropertyAnimation(card.opacity_effect, b"opacity")
@@ -645,13 +439,32 @@ class SearchResultPanel(QWidget):
             "QTabBar { background: transparent; } "
             "QTabBar::tab { background: #F3F4F6; padding: 8px 24px; border: 1px solid #E5E7EB; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; font-size: 14px; font-weight: bold; } "
             "QTabBar::tab:hover { background: #E5E7EB; } "
-            # 注意这里：选中时有 1px 的白色底边，用来和下方的白底无缝拼接
             "QTabBar::tab:selected { background: white; color: #059669; border-top: 3px solid #059669; border-bottom: 1px solid white; }"
         )
-        self.tab_bar.addTab("⚡ 待处理")
-        self.tab_bar.addTab("⏳ 处理中")
-        self.tab_bar.addTab("🗄️ 已归档")
-        right_layout.addWidget(self.tab_bar)
+        self.tab_bar.addTab("待处理")
+        self.tab_bar.addTab("处理中")
+        self.tab_bar.addTab("已归档")
+
+        # ★ 核心修改：将 Tab 栏和新增的解析按钮放进同一水平布局
+        tab_layout = QHBoxLayout()
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(10)
+        tab_layout.addWidget(self.tab_bar)
+
+        self.btn_parse = QPushButton("解析")
+        self.btn_parse.setFixedSize(60, 28)  # 固定大小，防止撑开
+        self.btn_parse.setStyleSheet(
+            "QPushButton { background: #FEF3C7; color: #D97706; border: 1px solid #F59E0B; border-radius: 4px; font-size: 13px; font-weight: bold; } "
+            "QPushButton:hover { background: #FDE68A; } "
+            "QPushButton:disabled { background: #F3F4F6; color: #9CA3AF; border-color: #E5E7EB; }"
+        )
+        self.btn_parse.setCursor(Qt.PointingHandCursor)
+        self.btn_parse.hide()  # 默认隐藏，有数据才显示
+        self.btn_parse.clicked.connect(self._trigger_manual_parse)
+        # 将按钮靠底部对齐，使其与 Tab 标签在视觉上平齐
+        tab_layout.addWidget(self.btn_parse, 0, Qt.AlignBottom)
+
+        right_layout.addLayout(tab_layout)
 
         # --- 3. 内部白底板（包裹标签、列表和底部操作栏） ---
         self.content_frame = QFrame()
@@ -664,11 +477,37 @@ class SearchResultPanel(QWidget):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
 
-        # --- 4. 标签过滤行 ---
-        self.stats_layout = QHBoxLayout()
+        # --- 4. 标签过滤行（横向可滚动） ---
+        self.stats_scroll = QScrollArea()
+        self.stats_scroll.setWidgetResizable(True)
+        self.stats_scroll.setFrameShape(QFrame.NoFrame)
+        self.stats_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.stats_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.stats_scroll.setFixedHeight(50)  # 标签高 + 横向滚动条，按 DPI 微调
+        self.stats_scroll.setStyleSheet("""
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:horizontal {
+                height: 4px;          /* ← 滚动条“厚度”，嫌太宽/太粗就改这里，比如 6px 或 4px */
+                background: transparent;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #D1D5DB;
+                border-radius: 4px;   /* 圆角，高度改小后同步改成 height/2 */
+                min-width: 30px;      /* ← 滑块最小“长度”，嫌滑块太长就调小，比如 20px */
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+        """)
+
+        self.stats_container = QWidget()
+        self.stats_container.setStyleSheet("background: transparent;")
+        self.stats_layout = QHBoxLayout(self.stats_container)
         self.stats_layout.setSpacing(10)
-        self.stats_layout.setContentsMargins(10, 10, 10, 5)
-        content_layout.addLayout(self.stats_layout)
+        self.stats_layout.setContentsMargins(10, 5, 10, 5)
+        self.stats_scroll.setWidget(self.stats_container)
+
+        content_layout.addWidget(self.stats_scroll)
 
         # --- 5. 卡片列表区 ---
         self.stack = QStackedWidget()
@@ -719,7 +558,22 @@ class SearchResultPanel(QWidget):
     def _on_new_data_inserted(self, count):
         self.refresh_tables()
 
+    def _trigger_manual_parse(self):
+        """触发后台解析"""
+        if getattr(self.main_page, "_is_background_parsing", False):
+            return
+        self.btn_parse.setText("解析中...")
+        self.btn_parse.setEnabled(False)
+        self.main_page._is_background_parsing = True
+        # 触发全库解析
+        trigger_parse(None, is_exact=False)
+
     def _on_parse_done(self, success, batch_id=None):
+        # ★ 恢复按钮状态
+        self.btn_parse.setText("解析")
+        self.btn_parse.setEnabled(True)
+        self.main_page._is_background_parsing = False
+
         self.refresh_tables()
         if success:
             if self.tab_bar.currentIndex() != 0:
@@ -750,13 +604,20 @@ class SearchResultPanel(QWidget):
             self._cached_tables = get_batch_tables("ALL")
 
             stats = self._cached_tables.get("stats", {})
-            total_todo = stats.get("明确资源", 0) + stats.get("未知网站", 0) + stats.get("关键词未命中", 0)
+            total_todo = stats.get("明确资源", 0) + stats.get("未知网站", 0) + stats.get("未命中关键词", 0)
             total_pending = stats.get("待解析", 0) + stats.get("解析失败", 0)
             total_archive = stats.get("已在库", 0) + stats.get("白名单", 0) + stats.get("已永删", 0)
 
-            self.tab_bar.setTabText(0, f"⚡ 待处理 ({total_todo})")
-            self.tab_bar.setTabText(1, f"⏳ 处理中 ({total_pending})")
-            self.tab_bar.setTabText(2, f"🗄️ 已归档 ({total_archive})")
+            self.tab_bar.setTabText(0, f"待处理 ({total_todo})")
+            self.tab_bar.setTabText(1, f"处理中 ({total_pending})")
+            self.tab_bar.setTabText(2, f"已归档 ({total_archive})")
+
+            # ★ 核心修改：根据待解析数量控制按钮显示
+            pending_count = stats.get("待解析", 0)
+            if pending_count > 0:
+                self.btn_parse.show()
+            else:
+                self.btn_parse.hide()
 
             self.update_current_tab_only(self.tab_bar.currentIndex())
         finally:
@@ -799,17 +660,17 @@ class SearchResultPanel(QWidget):
             elif item.spacerItem():
                 del item
 
-        tooltip_map = {"明确资源": "建议入库", "未知网站": "待分类", "关键词未命中": "建议永删"}
+        tooltip_map = {"明确资源": "建议入库", "未知网站": "待分类", "未命中关键词": "建议永删"}
 
         if self.tab_bar.currentIndex() == 0:
             tags = [
                 ("全部", None, "#F3F4F6", "#374151"),
                 ("明确资源", "明确资源", "#ECFDF5", "#065F46"),
                 ("未知网站", "未知网站", "#FEF3C7", "#92400E"),
-                ("关键词未命中", "关键词未命中", "#F3F4F6", "#374151"),
+                ("未命中关键词", "未命中关键词", "#F3F4F6", "#374151"),
                 ("手动拾取", "手动拾取", "#FDF4FF", "#C026D3"),
             ]
-            total_count = stats.get("明确资源", 0) + stats.get("未知网站", 0) + stats.get("关键词未命中", 0)
+            total_count = stats.get("明确资源", 0) + stats.get("未知网站", 0) + stats.get("未命中关键词", 0)
         elif self.tab_bar.currentIndex() == 1:
             tags = [
                 ("全部", None, "#F3F4F6", "#374151"),

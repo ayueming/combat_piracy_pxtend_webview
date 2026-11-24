@@ -321,7 +321,6 @@ class SearchInputPanel(QWidget):
             conn.close()
 
     def setup_ui(self):
-        # ... 原有代码保持不变 ...
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(15)
@@ -332,21 +331,6 @@ class SearchInputPanel(QWidget):
         lbl_auto_search.setStyleSheet("font-size: 16px; font-weight: bold; color: #111827;")
         title_layout.addWidget(lbl_auto_search)
         title_layout.addStretch()
-
-        self.parse_btn = QPushButton("🔄 发现异常数据，点击重试")
-        self.parse_btn.setStyleSheet(
-            "QPushButton { color: #D97706; font-weight: bold; background: transparent; border: none; font-size: 12px; padding: 0; } "
-            "QPushButton:hover { color: #B45309; text-decoration: underline; }"
-        )
-        self.parse_btn.setCursor(Qt.PointingHandCursor)
-        self.parse_btn.clicked.connect(self.trigger_manual_parse)
-        self.parse_btn.hide()
-        title_layout.addWidget(self.parse_btn)
-
-        self.parsing_label = QLabel("⏳ 正在请求解析...")
-        self.parsing_label.setStyleSheet("color: #DC2626; font-weight: bold; font-size: 12px; background: transparent;")
-        self.parsing_label.hide()
-        title_layout.addWidget(self.parsing_label)
 
         layout.addLayout(title_layout)
 
@@ -572,38 +556,24 @@ class SearchInputPanel(QWidget):
     def _on_stop_search(self):
         print("用户点击了强制停止搜索")
         if self.progress_dialog:
-            self.progress_dialog.update_status("正在尝试停止并保存数据...", 0, 0)
+            self.progress_dialog.update_status("正在停止并保存数据...", 0, 0)
 
-        # ★ 关键：主动切断队列，防止队列卡在等待解析的死锁中
         from search_task_queue import task_queue
         task_queue.stop()
 
-        # 延迟隐藏窗口，让用户看到停止提示
-        QTimer.singleShot(500, self.progress_dialog.hide)
+        # ★ 异步关 tab，不阻塞 UI
+        import threading
+        def _async_close():
+            try:
+                from browser_cdp_control import close_search_tabs
+                close_search_tabs()
+            except Exception:
+                pass
 
+        threading.Thread(target=_async_close, daemon=True).start()
+
+        QTimer.singleShot(500, self.progress_dialog.hide)
         self._on_search_end(None)
 
-    def trigger_manual_parse(self):
-        if getattr(self.main_page, "_is_background_parsing", False):
-            return
-
-        self.parse_btn.hide()
-        self.parsing_label.setText("⏳ 正在后台重新解析...")
-        self.parsing_label.show()
-        self.main_page._is_background_parsing = True
-
-        # ★ 传 None，代表解析全库所有的 PENDING
-        trigger_parse(None, is_exact=False)
-
     def update_parse_state(self, stats):
-        self.parsing_label.hide()
-        self.main_page._is_background_parsing = False
-
-        # ★ 修复：解析失败是终态，不应该算作“未解析”，只统计 PENDING 状态
-        pending_count = stats.get("待解析", 0)
-
-        if pending_count > 0:
-            self.parse_btn.setText(f"⚠️ {pending_count} 条未解析，点击重试")
-            self.parse_btn.show()
-        else:
-            self.parse_btn.hide()
+        pass

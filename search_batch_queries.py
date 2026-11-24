@@ -71,7 +71,7 @@ def get_batch_tables(batch_id=None):
         stats = {
             "明确资源": len(res_confirmed),
             "未知网站": len(res_unknown),
-            "关键词未命中": len(res_unmatched),
+            "未命中关键词": len(res_unmatched),
             "手动拾取": manual_count,
             "待解析": len(res_pending),
             "解析失败": len(res_failed),

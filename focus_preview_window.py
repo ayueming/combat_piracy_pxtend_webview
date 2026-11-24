@@ -73,7 +73,7 @@ class BaseFocusWindow(QWidget):
         self.picker.picked.connect(lambda rec: ws_signals.new_data_inserted.emit(1))
         self.picker.batch_saved.connect(lambda bid: ws_signals.new_data_inserted.emit(1))
 
-        main_layout.addWidget(self.picker, 55)
+        main_layout.addWidget(self.picker, 60)
 
         # ===== 右侧：workbench =====
         right_panel = QWidget()
@@ -93,7 +93,7 @@ class BaseFocusWindow(QWidget):
         if self.workbench_widget is not None:
             right_layout.addWidget(self.workbench_widget, 1)
 
-        main_layout.addWidget(right_panel, 45)
+        main_layout.addWidget(right_panel, 40)
 
     def _build_ctx(self):
         books = []

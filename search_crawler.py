@@ -61,7 +61,7 @@ class SearchCrawler:
 
                     self._log(f"🔍 正在打开: {task['url']}")
                     global_limiter.wait()
-                    page.goto(task["url"], wait_until="domcontentloaded", timeout=30000)
+                    page.goto(task["url"], wait_until="domcontentloaded", timeout=8000)
                     page.add_script_tag(content=self.scanner_js)
                     page.wait_for_timeout(1500)
 
@@ -165,6 +165,9 @@ class SearchCrawler:
                                 empty_scroll_count = 0
                                 last_total = current_total
 
+                        self._log(f"✅ 滚动抓取完成，共提取 {len(final_links_map)} 条")
+                        return list(final_links_map.values())
+
                     # ================= 模式 B：点击翻页 =================
                     elif mode == "click":
                         self._log(f"📄 开始点击翻页抓取 (限制 {max_pages} 页)...", 0, max_pages)
@@ -173,7 +176,7 @@ class SearchCrawler:
 
                         for page_num in range(1, max_pages + 1):
                             if page_num == 1:
-                                wait_top = random.uniform(1.5, 3.5)
+                                wait_top = random.uniform(1., 2.5)
                                 self._log(f"👀 第 {page_num} 页加载完毕，停留 {wait_top:.1f} 秒...", page_num - 1,
                                           max_pages)
                                 page.wait_for_timeout(int(wait_top * 1000))
@@ -328,6 +331,164 @@ class SearchCrawler:
 
                         self._log(f"✅ 抓取完成，共提取 {len(final_links_map)} 条", max_pages, max_pages)
                         return list(final_links_map.values())
+
+                    # ================= 模式 C：追加式点击翻页（UC 神马等） =================
+                    # 特征：点击下一页 → 页面不重载、URL 不变、DOM 追加新结果
+                    # 停止逻辑：① 找不到下一页按钮 ② 点击后结果数不增 ③ 达到 max_pages 安全阀
+                    elif mode == "click_append":
+                        self._log(f"📄 开始追加式点击翻页 (安全阀 {max_pages} 页)...", 0, max_pages)
+                        next_btn_selector = strategy.get("nextBtnSelector", "")
+                        result_selector = strategy.get("resultSelector", "")
+
+                        if not result_selector:
+                            self._log("❌ click_append 模式缺少 resultSelector，无法判断是否翻页成功")
+                            return list(final_links_map.values())
+
+                        def _count_results():
+                            try:
+                                return page.evaluate(
+                                    f"document.querySelectorAll({repr(result_selector)}).length"
+                                )
+                            except Exception:
+                                return 0
+
+                        def _get_next_btn():
+                            """返回可点击的下一页按钮；不存在/不可见/禁用 → None"""
+                            if not next_btn_selector:
+                                return None
+                            try:
+                                loc = page.locator(next_btn_selector)
+                                if loc.count() == 0:
+                                    return None
+                                btn = loc.first
+                                if not btn.is_visible():
+                                    return None
+                                cls = (btn.get_attribute("class") or "").lower()
+                                if "disabled" in cls:
+                                    return None
+                                if btn.get_attribute("disabled") is not None:
+                                    return None
+                                # <a> 无 href 是正常情况，不当作无效
+                                return btn
+                            except Exception:
+                                return None
+
+                        for page_num in range(1, max_pages + 1):
+                            # ---- 1. 等首屏 / 上一页结果稳定 ----
+                            if page_num == 1:
+                                wait_top = random.uniform(1.0, 2.5)
+                                self._log(f"👀 第 {page_num} 页加载完毕，停留 {wait_top:.1f} 秒...",
+                                          page_num - 1, max_pages)
+                                page.wait_for_timeout(int(wait_top * 1000))
+                            else:
+                                page.wait_for_timeout(random.randint(500, 1500))
+
+                            # ---- 2. 轻量滚动到底（触发懒加载，别太复杂）----
+                            page.evaluate(
+                                "window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });"
+                            )
+                            page.wait_for_timeout(random.randint(600, 1000))
+
+                            # ---- 3. 扫描当前全量 DOM（scanGeneric 自带全量 + 去重）----
+                            try:
+                                self._ensure_scanner_loaded(page)
+                                if scanner_type == "tieba":
+                                    current_links = page.evaluate(
+                                        "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)",
+                                        strategy)
+                                else:
+                                    current_links = page.evaluate(
+                                        "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)",
+                                        strategy)
+                                if current_links:
+                                    new_cnt = 0
+                                    for link in current_links:
+                                        url = link.get("url")
+                                        if url and url not in final_links_map:
+                                            final_links_map[url] = link
+                                            new_cnt += 1
+                                    self._log(
+                                        f"✅ 第 {page_num} 页扫描：本页新增 {new_cnt} 条，累计 {len(final_links_map)} 条",
+                                        page_num, max_pages)
+                                else:
+                                    self._log(f"✅ 第 {page_num} 页扫描：无结果", page_num, max_pages)
+                            except Exception as e:
+                                self._log(f"⚠️ 第 {page_num} 页扫描失败: {e}", page_num, max_pages)
+                                break
+
+                            # ---- 4. 安全阀：达到最大页数 ----
+                            if page_num >= max_pages:
+                                self._log(f"🛑 已达到安全阀 max_pages={max_pages}，停止翻页",
+                                          page_num, max_pages)
+                                break
+
+                            # ---- 5. 主判据：没有下一页按钮 → 自然到底 ----
+                            next_btn = _get_next_btn()
+                            if next_btn is None:
+                                self._log(f"🛑 已无「下一页」按钮（第 {page_num} 页后到底），停止翻页",
+                                          page_num, max_pages)
+                                break
+
+                            # ---- 6. 记下翻页前结果数 ----
+                            before_count = _count_results()
+                            self._log(f"📊 翻页前 DOM 结果数: {before_count}", page_num, max_pages)
+
+                            # ---- 7. 点击下一页（按钮会被追加结果推下去，先滚到可见）----
+                            try:
+                                next_btn.scroll_into_view_if_needed()
+                                page.wait_for_timeout(random.randint(400, 800))
+                                try:
+                                    box = next_btn.bounding_box()
+                                    if box:
+                                        cx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+                                        cy = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+                                        page.mouse.move(cx, cy, steps=random.randint(5, 10))
+                                        page.wait_for_timeout(random.randint(100, 300))
+                                        page.mouse.click(cx, cy)
+                                    else:
+                                        next_btn.click(timeout=5000)
+                                except Exception as e:
+                                    self._log(f"⚠️ 点击下一页失败: {e}", page_num, max_pages)
+                                    break
+                            except Exception as e:
+                                self._log(f"⚠️ 定位下一页按钮失败: {e}", page_num, max_pages)
+                                break
+
+                            # ---- 8. 辅助：等 loading 出现（可选，2s 内没出现就跳过）----
+                            try:
+                                page.wait_for_function(
+                                    """(() => {
+                                        const el = document.querySelector('#pager .p-loading');
+                                        if (!el) return false;
+                                        const s = getComputedStyle(el);
+                                        return s.display !== 'none'
+                                            && s.visibility !== 'hidden'
+                                            && el.offsetParent !== null;
+                                    })()""",
+                                    timeout=2000
+                                )
+                            except Exception:
+                                pass
+
+                            # ---- 9. 兜底判据：等结果数增加（防止按钮还在但点了没反应）----
+                            try:
+                                page.wait_for_function(
+                                    f"document.querySelectorAll({repr(result_selector)}).length > {before_count}",
+                                    timeout=8000
+                                )
+                                after_count = _count_results()
+                                self._log(
+                                    f"✅ 追加成功: {before_count} → {after_count} (+{after_count - before_count})",
+                                    page_num, max_pages)
+                            except Exception:
+                                self._log(
+                                    f"🛑 点击后结果数未增加（仍为 {before_count}），判定到底或按钮失效，停止",
+                                    page_num, max_pages)
+                                break
+
+                        self._log(f"✅ 抓取完成，共提取 {len(final_links_map)} 条", max_pages, max_pages)
+                        return list(final_links_map.values())
+
                 finally:
                     if page:
                         try:
@@ -336,11 +497,25 @@ class SearchCrawler:
                             pass
             except Exception as e:
                 err_msg = str(e).lower()
-                if (
-                        "connection closed" in err_msg or "target closed" in err_msg or "browser closed" in err_msg) and attempt == 0:
-                    self._log(f"⚠️ 检测到浏览器连接断开 ({e})，准备重置连接并重试...")
-                    self.bm.reset_playwright();
-                    time.sleep(2);
+                is_conn_error = ("connection closed" in err_msg
+                                 or "target closed" in err_msg
+                                 or "browser closed" in err_msg
+                                 or "has been closed" in err_msg
+                                 or "target page, context or browser" in err_msg)
+
+                if is_conn_error and attempt == 0:
+                    # ★ 关键：browser 还连着 → 是用户停止/关 tab 导致的，不重试直接退
+                    browser_alive = False
+                    try:
+                        browser_alive = bool(self.bm._browser and self.bm._browser.is_connected())
+                    except Exception:
+                        pass
+                    if browser_alive:
+                        self._log(f"🛑 任务被中断（tab 已关闭），不重试: {e}")
+                        break  # 跳出 for attempt 循环，走 finally 返回
+                    # 浏览器真的断了，才 reset + 重试
+                    self.bm.reset_playwright()
+                    time.sleep(2)
                     continue
 
                 self._log(f"❌ 搜索执行异常: {e}")

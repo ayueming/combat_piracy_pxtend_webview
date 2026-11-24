@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 from browser_manager import BrowserManager
 from rate_limiter import global_limiter
 from spider_extractor import extract_chapters
-from mobile_url_utils import resolve_is_mobile
+
 from app_data.mobile_consts import MOBILE_UA, DESKTOP_UA
 
 
@@ -38,13 +38,14 @@ def crawl_sites(rows_to_crawl, on_progress=None):
         context = bm._browser.contexts[0]
         log(f">>> got context, pages={len(context.pages)}")
 
-        for db_id, book_name, cat, url, src_name, src_attr in rows_to_crawl:
+        for db_id, book_name, cat, url, src_name, src_attr, is_mobile in rows_to_crawl:
             domain = urlparse(url).netloc or url
             log(f"=== 开始 {domain} ===")
             if on_progress:
                 on_progress(f"加载中: {domain}")
 
             page = None
+            cleanup = None      # ★ 移动端走新 context 时由 open_isolated_mobile_page 返回
             html_content = None
             page_url_snapshot = url
             n = 0
@@ -53,61 +54,64 @@ def crawl_sites(rows_to_crawl, on_progress=None):
                 log(f"step1: global_limiter.wait()")
                 global_limiter.wait()
 
-                log(f"step2: context.new_page()")
-                page = context.new_page()
-                log(f"step2: new_page OK")
-
-                is_mobile = resolve_is_mobile(0, url)
-                log(f"step3: set_extra_http_headers (is_mobile={is_mobile})")
+                log(f"step2: open page (is_mobile={is_mobile})")
                 if is_mobile:
-                    page.set_extra_http_headers({
-                        "User-Agent": MOBILE_UA,
-                        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
-                    })
-                    page.set_viewport_size({"width": 390, "height": 844})
+                    # ★ 真移动：新 context + is_mobile + has_touch + MOBILE_UA
+                    page, cleanup = bm.open_isolated_mobile_page()
                 else:
+                    # 桌面端：保持原样，context0 + 桌面 UA
+                    page = context.new_page()
                     page.set_extra_http_headers({
                         "User-Agent": DESKTOP_UA,
                         "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
                     })
-                log(f"step3: OK")
+                log(f"step2: open page OK")
 
-                log(f"step4: goto start")
+                log(f"step3: goto start")
                 page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                log(f"step4: goto done")
+                log(f"step3: goto done")
 
-                log(f"step5: wait_for_timeout(2000)")
+                log(f"step4: wait_for_timeout(2000)")
                 page.wait_for_timeout(2000)
-                log(f"step5: OK")
+                log(f"step4: OK")
 
-                log(f"step6: content() start")
+                log(f"step5: content() start")
                 html_content = page.content()
                 page_url_snapshot = page.url
-                log(f"step6: content OK, len={len(html_content)}, final_url={page_url_snapshot[:80]}")
+                log(f"step5: content OK, len={len(html_content)}, final_url={page_url_snapshot[:80]}")
 
-                # ★ 核心：content 后立刻关页，不跨 CPU 密集区
-                log(f"step7: page.close() start")
-                try:
-                    page.close(run_before_unload=False)
-                    log(f"step7: page.close OK")
-                except Exception as e:
-                    log(f"step7: page.close 异常(已忽略): {e}")
-                page = None
+                # ★ 核心：content 后立刻关闭，不跨 CPU 密集区
+                log(f"step6: close start")
+                if cleanup:
+                    try:
+                        cleanup()
+                    except Exception as e:
+                        log(f"step6: cleanup 异常(已忽略): {e}")
+                    cleanup = None
+                    page = None
+                else:
+                    try:
+                        page.close(run_before_unload=False)
+                    except Exception as e:
+                        log(f"step6: page.close 异常(已忽略): {e}")
+                    page = None
+                log(f"step6: close OK")
 
-                log(f"step8: BeautifulSoup 解析 start")
+                log(f"step7: BeautifulSoup 解析 start")
                 soup = BeautifulSoup(html_content, "html.parser")
-                log(f"step8: soup OK")
+                log(f"step7: soup OK")
 
-                log(f"step9: extract_chapters start")
+                log(f"step8: extract_chapters start")
                 seen_codes = set()
                 c_count, i_count, results = extract_chapters(
                     soup, page_url_snapshot, book_name, cat,
                     src_name, db_id, seen_codes,
+                    is_mobile=is_mobile,
                 )
-                log(f"step9: extract OK c={c_count} i={i_count} n={len(results)}")
+                log(f"step8: extract OK c={c_count} i={i_count} n={len(results)}")
 
                 if c_count == 0 and i_count == 0:
-                    log(f"step10: 0 条命中，DOM 解剖")
+                    log(f"step9: 0 条命中，DOM 解剖")
                     found_a = False
                     for a_tag in soup.find_all("a"):
                         if "第1章" in a_tag.text:
@@ -122,7 +126,7 @@ def crawl_sites(rows_to_crawl, on_progress=None):
                 total_intros += i_count
                 all_results.extend(results)
                 n = len(results)
-                log(f"step11: 累计完成 n={n}")
+                log(f"step10: 累计完成 n={n}")
 
             except Exception as e:
                 status = "failed"
@@ -132,9 +136,17 @@ def crawl_sites(rows_to_crawl, on_progress=None):
                 print(traceback.format_exc(), flush=True)
                 global_limiter.penalize(2.0)
             finally:
-                if page is not None:
+                # ★ 优先 cleanup（关闭整个 context），其次 page.close 兜底
+                if cleanup:
                     try:
-                        log(f"finally: 兜底 close")
+                        log(f"finally: cleanup (close context)")
+                        cleanup()
+                        log(f"finally: cleanup OK")
+                    except Exception as e:
+                        log(f"finally: cleanup 异常(已忽略): {e}")
+                elif page is not None:
+                    try:
+                        log(f"finally: 兜底 close page")
                         page.close()
                         log(f"finally: close OK")
                     except Exception as e:
@@ -148,7 +160,8 @@ def crawl_sites(rows_to_crawl, on_progress=None):
         bm.run_in_browser_thread(_do_crawl_in_browser)
     except Exception as e:
         print(f"⚠️ [SpiderCrawler] 浏览器排队解析失败: {e}")
-        for db_id, book_name, cat, url, src_name, src_attr in rows_to_crawl:
+        for row in rows_to_crawl:
+            db_id, book_name, cat, url, src_name, src_attr = row[:6]  # 兼容 6/7 元组
             domain = urlparse(url).netloc or url
             stats.append((book_name or "未关联", cat, domain, 0, "failed"))
 

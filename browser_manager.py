@@ -8,9 +8,16 @@ from playwright.sync_api import sync_playwright
 
 from app_paths import get_user_dir, DIR_BROWSER_PROFILE
 from app_data.browser_consts import CDP_PORT, CDP_READY_TIMEOUT
+from app_data.mobile_consts import MOBILE_UA
 from db_config import get_current_user
 from browser_thread import BrowserThread
 
+_MOBILE_CTX_DEFAULTS = dict(
+    user_agent=MOBILE_UA,
+    viewport={"width": 390, "height": 844},
+    is_mobile=True,
+    has_touch=True,
+)
 
 class BrowserManager:
     _instance = None
@@ -358,3 +365,34 @@ class BrowserManager:
             self._pw = None
             self._picker_injected = False
             print("🔌 [BrowserManager] 已断开 CDP 连接，浏览器进程予以保留。")
+
+    def open_isolated_mobile_page(self):
+        """新建隔离 context + 完整移动端模拟，供 4/5/6 调用。
+
+        - 只能在 BrowserThread 内调用（调用方通常已通过 run_in_browser_thread 投递）
+        - 返回 (page, cleanup)。cleanup() 关闭整个 context，连带关闭 page。
+        - 不调 _patch_page、不调 _force_activate，和 link_resolver 现有行为完全一致
+        - 不碰 context0，不影响搜索/投诉/桌面端
+        """
+        return self._bt.submit(self._open_isolated_mobile_page_impl)
+
+    def _open_isolated_mobile_page_impl(self):
+        self._ensure_started_impl(minimized=False)
+        ctx = self._browser.new_context(**_MOBILE_CTX_DEFAULTS)
+        try:
+            page = ctx.new_page()
+        except Exception:
+            # ★ 防泄漏：new_page 失败时立刻关 context
+            try:
+                ctx.close()
+            except Exception:
+                pass
+            raise
+
+        def cleanup():
+            try:
+                ctx.close()
+            except Exception as e:
+                print(f"[BM.open_isolated_mobile_page] 关闭 context 失败: {e}")
+
+        return page, cleanup
