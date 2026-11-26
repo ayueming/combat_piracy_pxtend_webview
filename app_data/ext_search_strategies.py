@@ -205,7 +205,7 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": []
         }
     },
-    "微博搜索": {
+    "微博搜索(试用版)": {
         "mode": "click",
         "scanner": "generic",
         "base_url": "https:",

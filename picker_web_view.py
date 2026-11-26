@@ -1,13 +1,21 @@
 # picker_web_view.py
-"""可复用的 WebView + Picker 组件。
+"""
+此 WebView 不校验 TLS 证书，仅用于预览不可信源站，不得用于登录/支付场景
+
+可复用的 WebView + Picker 组件。
 
 对外只暴露信号；锁、UA 切换、注入逻辑全部内部处理。
 """
-from PySide6.QtCore import QUrl, QFile, QIODevice, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QProgressBar
+import re
+from urllib.parse import quote
+from PySide6.QtCore import QUrl, QFile, QIODevice, Signal, Qt, QSize
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QProgressBar, QHBoxLayout,
+    QLineEdit, QToolButton, QStyle
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 
 from app_state import app_state
 from webview_profile_factory import create_preview_profile
@@ -15,9 +23,59 @@ from picker_injector import build_picker_js
 from picker_js_bridge import PickerJsBridge
 
 
+# 页面创建阶段注入，用来接管 window.open / target=_blank
+POPUP_GUARD_JS = r"""
+(function() {
+    if (window.__apt_popup_guard_installed__) return;
+    window.__apt_popup_guard_installed__ = true;
+
+    var USER_NAV_DEBOUNCE_MS = 400;   // 用户主动点击：仅防连点
+    var lastNavAt = 0;
+
+    function userGestureActive() {
+        return !!(navigator.userActivation && navigator.userActivation.isActive);
+    }
+
+    function allowUserNav(url) {
+        var now = Date.now();
+        if (now - lastNavAt < USER_NAV_DEBOUNCE_MS) {
+            console.warn('[Picker] 点击过快，防抖:', url);
+            return false;
+        }
+        lastNavAt = now;
+        return true;
+    }
+
+    // 1) window.open：无手势一律拒；有手势同页跳
+    window.open = function(url, name, features) {
+        if (!url) return null;
+        if (!userGestureActive()) {
+            console.warn('[Picker] 拦截无手势 window.open:', url);
+            return null;
+        }
+        if (!allowUserNav(url)) return null;
+        window.location.href = url;
+        return null;   // ★ 永远不返回 window
+    };
+
+    // 2) target=_blank 点击：同页跳 + 防抖
+    document.addEventListener('click', function(e) {
+        if (!e.isTrusted) return;
+        var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!a) return;
+        if ((a.getAttribute('target') || '').toLowerCase() !== '_blank') return;
+        var href = a.href;
+        if (!href) return;
+        e.preventDefault();
+        if (allowUserNav(href)) window.location.href = href;
+    }, true);
+})();
+"""
+
+
 class SafeWebPage(QWebEnginePage):
     def createWindow(self, _type):
-        print("🛡️ [WebEngine] 成功拦截一个网页弹窗")
+        print("🛡️ [WebEngine] 兜底拦截一个新的弹窗请求（已被页面层守卫覆盖）")
         return None
 
     def javaScriptAlert(self, securityOrigin, msg):
@@ -30,11 +88,12 @@ class SafeWebPage(QWebEnginePage):
         return (False, "")
 
     def certificateError(self, error):
-        return True     # ★ 接受所有证书，保证盗文站可预览（业务必需）
+        return True  # ★ 接受所有证书，保证盗文站可预览（业务必需）
+
 
 class PickerWebView(QWidget):
-    picked      = Signal(dict)
-    saved_page  = Signal(dict)    # ★ 与 bridge 保持一致
+    picked = Signal(dict)
+    saved_page = Signal(dict)  # ★ 与 bridge 保持一致
     batch_saved = Signal(str)
     ua_switched = Signal(int)
 
@@ -74,15 +133,20 @@ class PickerWebView(QWidget):
         """)
         layout.addWidget(self._progress_bar)
 
+        # ★★★ 修复点：必须先实例化 web_view，导航栏里才能 connect 它的槽函数 ★★★
         self.web_view = QWebEngineView()
-        # ★ 绑定我们写的安全 Page 类
         self._setup_profile()
+
+        # ★ 新增：地址栏导航条（必须放在 web_view 创建之后）
+        self._setup_nav_bar(layout)
+
         layout.addWidget(self.web_view)
 
-        self.channel = QWebChannel(self)  # ★ 加 self
-        self.bridge = PickerJsBridge(self._context_provider, self)  # ★ 加 self
+        self.channel = QWebChannel(self)
+        self.bridge = PickerJsBridge(self._context_provider, self)
         self.channel.registerObject("pyBridge", self.bridge)
         self.web_view.page().setWebChannel(self.channel)
+        self._install_popup_guard()
 
         self.bridge.picked.connect(self.picked.emit)
         self.bridge.saved_page.connect(self.saved_page.emit)
@@ -103,6 +167,133 @@ class PickerWebView(QWidget):
         self.web_view.loadStarted.connect(
             lambda: print(f"▶️ [Picker] 开始加载网页...")
         )
+
+        # ★ 地址栏与 WebView 状态同步
+        self.web_view.urlChanged.connect(self._on_url_changed)
+        self.web_view.loadFinished.connect(self._update_back_button_state)
+
+    # ---------- 新增：构建顶部导航栏 ----------
+    def _setup_nav_bar(self, parent_layout):
+        nav_widget = QWidget()
+        nav_widget.setFixedHeight(40)
+        nav_widget.setStyleSheet("background-color: #f6f8fa; border-bottom: 1px solid #eaeef2;")
+        nav_layout = QHBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(10, 5, 10, 5)
+        nav_layout.setSpacing(8)
+
+        # 后退按钮
+        self.btn_back = QToolButton()
+        self.btn_back.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.btn_back.setToolTip("后退")
+        self.btn_back.setEnabled(False)
+        self.btn_back.setCursor(Qt.PointingHandCursor)
+        self.btn_back.setStyleSheet(
+            "QToolButton { border: none; background: transparent; padding: 4px; } QToolButton:hover { background: #e1e4e8; border-radius: 4px; } QToolButton:disabled { opacity: 0.3; }")
+        self.btn_back.clicked.connect(self.web_view.back)
+
+        # 刷新按钮
+        self.btn_refresh = QToolButton()
+        self.btn_refresh.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.btn_refresh.setToolTip("刷新")
+        self.btn_refresh.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh.setStyleSheet(
+            "QToolButton { border: none; background: transparent; padding: 4px; } QToolButton:hover { background: #e1e4e8; border-radius: 4px; }")
+        self.btn_refresh.clicked.connect(self.web_view.reload)
+
+        # 地址栏 / 搜索框
+        self.address_bar = QLineEdit()
+        self.address_bar.setPlaceholderText("搜索或输入网址...")
+        self.address_bar.setClearButtonEnabled(True)
+        # 添加搜索图标
+        search_action = self.address_bar.addAction(
+            self.style().standardIcon(QStyle.SP_FileDialogContentsView),
+            QLineEdit.LeadingPosition
+        )
+
+        # 模仿图片中的圆角蓝框样式
+        self.address_bar.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #d0d7de;
+                border-radius: 14px;
+                padding: 4px 10px;
+                background: white;
+                font-size: 13px;
+                color: #24292f;
+            }
+            QLineEdit:focus {
+                border: 2px solid #1f6feb; /* 聚焦时蓝色边框 */
+                padding: 3px 9px;          /* 调整内边距防止文字跳动 */
+            }
+        """)
+        self.address_bar.returnPressed.connect(self._on_address_entered)
+
+        nav_layout.addWidget(self.btn_back)
+        nav_layout.addWidget(self.btn_refresh)
+        nav_layout.addWidget(self.address_bar)
+
+        parent_layout.addWidget(nav_widget)
+
+    _BAIDU_SEARCH_URL = "https://www.baidu.com/s?ie=utf-8&wd={}"
+
+    def _looks_like_url(self, text: str) -> bool:
+        """判断用户输入是否更像一个网址，而不是搜索词。"""
+        text = text.strip()
+        if not text:
+            return False
+        # 有显式协议，直接当 URL
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', text):
+            return True
+        # 含空白/中文，肯定是搜索词
+        if " " in text or "\t" in text:
+            return False
+        if re.search(r'[\u4e00-\u9fff]', text):
+            return False
+
+        # 取出 host 部分（去掉路径 / 查询 / 端口）
+        host = re.split(r'[/?#]', text, maxsplit=1)[0]
+        if host.startswith("localhost"):
+            return True
+        if ":" in host:
+            host = host.rsplit(":", 1)[0]
+
+        # IP 直连
+        if re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', host):
+            return True
+
+        # 域名：含点 且 TLD 是 ≥2 位字母
+        if "." in host and re.search(r'\.[a-zA-Z]{2,}$', host):
+            return True
+
+        return False
+
+    def _search_on_baidu(self, keyword: str):
+        keyword = keyword.strip()
+        if not keyword:
+            return
+        url = self._BAIDU_SEARCH_URL.format(quote(keyword, encoding="utf-8"))
+        print(f"🔍 [Picker] 百度搜索: {keyword} -> {url}")
+        self.load_url(url)
+
+    def _on_address_entered(self):
+        """地址栏按下回车：像网址就打开，否则用百度搜索。"""
+        text = self.address_bar.text().strip()
+        if not text:
+            return
+        if self._looks_like_url(text):
+            self.load_url(text)
+        else:
+            self._search_on_baidu(text)
+        self.web_view.setFocus()
+
+    def _on_url_changed(self, qurl: QUrl):
+        """网址变化时更新地址栏"""
+        if not self.address_bar.hasFocus():
+            self.address_bar.setText(qurl.toString())
+
+    def _update_back_button_state(self, ok):
+        """更新后退按钮的可用状态"""
+        if hasattr(self, "web_view") and hasattr(self, "btn_back"):
+            self.btn_back.setEnabled(self.web_view.history().canGoBack())
 
     # ---------- 对外：锁状态 ----------
     def is_locked_by_us(self) -> bool:
@@ -131,6 +322,16 @@ class PickerWebView(QWidget):
         print(f"🌐 [Picker] 正在加载: {qurl.toString()}")
         self.web_view.load(qurl)
 
+    def trigger_picking(self, enter: bool = True):
+        """供 Qt 宿主窗口在 WebView 失焦时转发 Alt，进入/退出拾取。"""
+        if not getattr(self, "web_view", None):
+            return
+        page = self.web_view.page()
+        if not page:
+            return
+        fn = "__apt_enter_picking__" if enter else "__apt_exit_picking__"
+        page.runJavaScript(f"window.{fn} && window.{fn}();")
+
     def set_mobile_mode(self, is_mobile: int):
         target = int(bool(is_mobile))
         if target == self._is_mobile:
@@ -153,6 +354,16 @@ class PickerWebView(QWidget):
         self._progress_bar.setValue(p)
 
     # ---------- 内部 ----------
+    def _install_popup_guard(self):
+        """在每个新文档创建时注入弹窗守卫（window.open / target=_blank）。"""
+        script = QWebEngineScript()
+        script.setName("picker_popup_guard")
+        script.setInjectionPoint(QWebEngineScript.DocumentCreation)
+        script.setWorldId(QWebEngineScript.MainWorld)
+        script.setRunsOnSubFrames(True)
+        script.setSourceCode(POPUP_GUARD_JS)
+        self.page.scripts().insert(script)
+
     def _setup_profile(self):
         self.profile = create_preview_profile(self.web_view, self._is_mobile)
         # ★ 直接把原来的 QWebEnginePage 替换为 SafeWebPage，并传入 profile
@@ -167,6 +378,10 @@ class PickerWebView(QWidget):
     def _on_load_finished(self, ok):
         # ★ 结束归零（进度条始终占位，视觉上即隐藏）
         self._progress_bar.setValue(0)
+
+        # 同步一下后退按钮状态
+        self._update_back_button_state(ok)
+
         if not ok:
             return
         f = QFile(":/qtwebchannel/qwebchannel.js")

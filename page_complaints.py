@@ -5,8 +5,8 @@ import time
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QListWidget, QTableWidget, QTableWidgetItem, QHeaderView,
                                QFileDialog, QMessageBox, QSplitter, QAbstractItemView,
-                               QProgressBar, QDialog, QFrame) # ★ 移除了 QTabWidget
-from PySide6.QtCore import Qt, Signal
+                               QProgressBar, QDialog, QFrame, QListWidgetItem) # ★ 移除了 QTabWidget
+from PySide6.QtCore import Qt, Signal, QSize, QVariantAnimation, QEasingCurve
 from datetime import datetime
 from db_config import get_conn
 
@@ -227,7 +227,27 @@ class ComplaintsPage(QWidget):
         left_layout.addWidget(left_title)
 
         self.batch_list = QListWidget()
-        self.batch_list.setStyleSheet(LIST_BASE)
+        # ★ 专门优化后的样式
+        self.batch_list.setStyleSheet("""
+                    QListWidget {
+                        border: 1px solid #E0E0E0;  /* 外框极细灰线 */
+                        border-radius: 4px;
+                        background-color: #FFFFFF;
+                        outline: none; /* 去掉点击时的虚线框 */
+                    }
+                    QListWidget::item {
+                        border-bottom: 1px solid #F0F0F0; /* 极淡的底部分割线 */
+                        border-left: 3px solid transparent; /* 默认预留左侧 3px 空间，防止选中时文字跳动 */
+                        background-color: transparent;
+                    }
+                    QListWidget::item:hover {
+                        background-color: #F5F7FA; /* 悬浮时的背景色 */
+                    }
+                    QListWidget::item:selected {
+                        background-color: #EBF3FF; /* 选中时的柔和背景色 */
+                        border-left: 3px solid #3B82F6; /* 选中时的左侧指示条，把粗黑线改为3px的蓝色 */
+                    }
+                """)
         self.batch_list.currentRowChanged.connect(self.on_batch_selected)
         left_layout.addWidget(self.batch_list)
         splitter.addWidget(left_widget)
@@ -373,20 +393,134 @@ class ComplaintsPage(QWidget):
         self._rebuild_batch_list()
         self.refresh_links_signal.emit()
 
-    def _rebuild_batch_list(self):
+    def _add_batch_item(self, text, batch_index):
+        """给批次列表添加一行：左边文字，右边 ✕ 移除按钮"""
+        item = QListWidgetItem()
+        self.batch_list.addItem(item)
+
+        row_widget = QWidget()
+        # ★ 关键：背景必须完全透明，否则会遮挡 QListWidget 原生的选中背景色
+        row_widget.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row_widget)
+        # 左边距 8px，右边距 10px，上下留 2px
+        row_layout.setContentsMargins(8, 2, 10, 2)
+        row_layout.setSpacing(4)
+
+        lbl = QLabel(text)
+        # 文字背景透明，字体颜色稍微加深
+        lbl.setStyleSheet("background: transparent; border: none; color: #333333; font-size: 13px;")
+        row_layout.addWidget(lbl, 1)
+
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedSize(20, 20)
+        remove_btn.setCursor(Qt.PointingHandCursor)
+        remove_btn.setToolTip("移除该批次")
+        remove_btn.setStyleSheet("""
+            QPushButton { 
+                border: none; background: transparent; color: #B0B0B0;
+                font-size: 12px; padding: 0; 
+            }
+            QPushButton:hover { 
+                color: #E74C3C; 
+                background-color: #FFE5E5; 
+                border-radius: 10px; /* 增加 hover 时的圆形背景 */
+            }
+            QPushButton:disabled { color: #E0E0E0; }
+        """)
+        remove_btn.clicked.connect(lambda _=False, i=batch_index: self._remove_batch(i))
+        row_layout.addWidget(remove_btn)
+
+        row_widget.setFixedHeight(32) # ★ 稍微加高一点，显得不拥挤
+        item.setSizeHint(QSize(0, 32))
+        self.batch_list.setItemWidget(item, row_widget)
+
+    def _remove_batch(self, index):
+        """移除指定索引的批次（带"向上收拢消失"动画）"""
+        if self.auto_running:
+            QMessageBox.warning(self, "提示", "自动任务正在运行中，无法移除批次！")
+            return
+        if index < 0 or index >= len(self.batches):
+            return
+
+        item = self.batch_list.item(index)
+        row_widget = self.batch_list.itemWidget(item)
+
+        # 兜底：如果拿不到 item / widget（极少见），直接无动画删除
+        if item is None or row_widget is None:
+            del self.batches[index]
+            next_index = max(0, min(index, len(self.batches) - 1))
+            self._rebuild_batch_list(select_index=next_index)
+            return
+
+        # 动画期间锁住列表，避免用户连点多个 ✕ 导致 index 错位
+        self.batch_list.setEnabled(False)
+
+        # 给整行加透明度效果：收拢的同时淡出，更顺滑
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        effect = QGraphicsOpacityEffect(row_widget)
+        effect.setOpacity(1.0)
+        row_widget.setGraphicsEffect(effect)
+
+        # 用一条 QVariantAnimation 同时驱动 高度 + 透明度
+        # 这样只产生一个 finished 信号，避免两个动画同归于尽时踩到已销毁的对象
+        anim = QVariantAnimation(self)
+        anim.setDuration(220)
+        anim.setStartValue(32)  # 当前行高
+        anim.setEndValue(0)  # 收拢到 0
+        anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+        def _on_value_changed(v):
+            try:
+                h = max(0, int(v))
+                # 关键：同步刷新 item 的 sizeHint，列表才会真正"塌陷"让下方项上移
+                item.setSizeHint(QSize(0, h))
+                # 同时把行内 widget 也压扁，避免内容溢出
+                row_widget.setFixedHeight(h)
+                # 高度越低越透明
+                effect.setOpacity(h / 32.0)
+            except RuntimeError:
+                # 动画结束/对象销毁时偶尔会进来一次，忽略即可
+                pass
+
+        anim.valueChanged.connect(_on_value_changed)
+
+        def _finish():
+            # 动画结束：真正从数据中删掉，再重建列表
+            if index < len(self.batches):
+                del self.batches[index]
+
+            next_index = index
+            if next_index >= len(self.batches):
+                next_index = len(self.batches) - 1
+            self._rebuild_batch_list(select_index=next_index)
+
+            # 恢复列表可用（auto_running 为 False 时）
+            self.batch_list.setEnabled(not self.auto_running)
+
+        anim.finished.connect(_finish)
+
+        # 关键：把 anim 挂到 self 上，防止局部变量被 GC 掉导致动画中断
+        self._remove_anim = anim
+        anim.start()
+
+    def _rebuild_batch_list(self, select_index=0):
         self.batch_list.blockSignals(True)
         self.batch_list.clear()
         for i, b in enumerate(self.batches):
             if b:
                 cat = b[0].get("cat", "未知分类")
                 book = b[0].get("book", "未知作品")
-                self.batch_list.addItem(f"[{cat}] {book} ({len(b)} 条)")
+                text = f"[{cat}] {book} ({len(b)} 条)"
             else:
-                self.batch_list.addItem(f"第 {i + 1} 批 (0 条)")
+                text = f"第 {i + 1} 批 (0 条)"
+            self._add_batch_item(text, i)
         self.batch_list.blockSignals(False)
 
         if self.batches:
-            self.batch_list.setCurrentRow(0)
+            idx = max(0, min(select_index, len(self.batches) - 1))
+            self.batch_list.setCurrentRow(idx)
+            # 显式刷新右侧，防止索引没变（如删除第 0 项后仍是第 0 行）信号不触发
+            self.on_batch_selected(idx)
         else:
             self.queue_table.setRowCount(0)
 
@@ -399,17 +533,9 @@ class ComplaintsPage(QWidget):
     # ==================== 批次管理 ====================
     def load_batches(self, batches):
         self.batches = batches
-        self.batch_list.clear()
-        for i, batch in enumerate(self.batches):
-            if batch:
-                cat = batch[0].get("cat", "未知分类")
-                book = batch[0].get("book", "未知作品")
-                self.batch_list.addItem(f"[{cat}] {book} ({len(batch)} 条)")
-            else:
-                self.batch_list.addItem(f"第 {i + 1} 批 (0 条)")
+        self._rebuild_batch_list()
 
         if self.batches:
-            self.batch_list.setCurrentRow(0)
             self.tabs.setCurrentIndex(0)
 
     def clear_batches(self):

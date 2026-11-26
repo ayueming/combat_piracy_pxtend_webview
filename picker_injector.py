@@ -76,7 +76,7 @@ def build_picker_js(ctx: dict) -> str:
                     <div class="ctx-kw">关键词: <b id="apt-kw">-</b></div>
                 </div>
                 <div class="actions">
-                    <button class="btn-save-page" id="btn-save-page">仅保存当前网址</button>
+                    <button class="btn-save-page" id="btn-save-page">保存当前页面网址</button>
                     <button class="btn-pick" id="btn-pick">手动拾取链接（或按住ALT）</button>
                     <button class="btn-ua-toggle" id="btn-ua-toggle"></button>
                     <button class="btn-save-batch" id="btn-save-batch">解析本次拾取</button>
@@ -148,6 +148,26 @@ def build_picker_js(ctx: dict) -> str:
                 mask.style.display = "none"; overlay.style.display = "none";
                 host.style.borderLeft = ""; hoverEl = null;
             }}
+            
+            // ---- 幂等保护 ----
+            function enterPicking() {{
+                if (isPicking) return;                      // ★ 防重复触发
+                isPicking = true; btnPick.classList.add("active");
+                btnPick.textContent = "🔴 拾取中（点击退出）";
+                mask.style.display = "block"; host.style.borderLeft = "4px solid #EF4444";
+            }}
+            function exitPicking() {{
+                if (!isPicking) return;                     // ★ 防重复触发
+                isPicking = false; btnPick.classList.remove("active");
+                btnPick.textContent = "手动拾取链接（或按住ALT）";
+                mask.style.display = "none"; overlay.style.display = "none";
+                host.style.borderLeft = ""; hoverEl = null;
+            }}
+
+            // ★ 暴露给 Qt 宿主窗口调用（WebView 失焦时转发 Alt 用）
+            window.__apt_enter_picking__ = enterPicking;
+            window.__apt_exit_picking__  = exitPicking;
+            window.__apt_is_picking__    = () => isPicking;
 
             btnPick.addEventListener("click", () => isPicking ? exitPicking() : enterPicking());
 

@@ -34,7 +34,12 @@ from page_profile import ProfilePage
 from login_window import LoginWindow
 from login_auto import try_auto_login, clear_session
 
-VERSION = "V3.7.1"
+from app_state import app_state
+from spider_forum_webview import SpiderForumWebView
+from picker_web_view import PickerWebView
+
+
+VERSION = "V3.8.0"
 
 
 # ==========================================
@@ -205,6 +210,9 @@ class MainApp(FluentWindow):
 
         self.navigationInterface.installEventFilter(self)
 
+        # ★ 全局键盘捕获：不依赖 WebView 焦点，Alt 也能触发拾取
+        QApplication.instance().installEventFilter(self)
+
         # ===== 3. 监听后台信号 =====
         ws_signals.new_data_inserted.connect(self.on_new_data)
         ws_signals.batch_finished.connect(self._on_batch_finished)
@@ -263,22 +271,65 @@ class MainApp(FluentWindow):
         )
 
     def eventFilter(self, obj, event):
+        # ===== 原有：导航栏悬停展开/收起 =====
         if hasattr(self, 'navigationInterface') and obj == self.navigationInterface:
             if event.type() == QEvent.Enter:
                 self.collapse_timer.stop()
-                self.expand_timer.start()  # 延迟 50ms 后再展开
+                self.expand_timer.start()
             elif event.type() == QEvent.Leave:
                 self.expand_timer.stop()
-                self.collapse_timer.start()  # 延迟 250ms 后再收起
+                self.collapse_timer.start()
+
+        et = event.type()
+
+        # ===== Alt 转发（覆盖 MainApp 与 FocusWindow） =====
+        if et == QEvent.KeyPress:
+            if event.key() == Qt.Key_Alt and not event.isAutoRepeat():
+                self._forward_alt_to_picker(True)
+        elif et == QEvent.KeyRelease:
+            if event.key() == Qt.Key_Alt and not event.isAutoRepeat():
+                self._forward_alt_to_picker(False)
+
+        # ===== 窗口失活兜底：Alt+Tab 切走 / 点别的程序 → 退出拾取 =====
+        if et == QEvent.WindowDeactivate and isinstance(obj, QWidget):
+            try:
+                for w in obj.findChildren(PickerWebView):
+                    if w.isVisible():
+                        w.trigger_picking(False)
+            except (AttributeError, RuntimeError):
+                pass
+
         return super().eventFilter(obj, event)
 
+    def _forward_alt_to_picker(self, enter: bool):
+        """把 Alt 状态转发给『当前活动窗口』里的 PickerWebView。
+        activeWindow 在 MainApp 里就找 MainApp 下的 picker，
+        在 FocusWindow 里就找 FocusWindow 下的 picker，互不干扰。"""
+        active = QApplication.activeWindow()
+        if not active:
+            return
+        try:
+            for w in active.findChildren(PickerWebView):
+                if w.isVisible():
+                    try:
+                        w.trigger_picking(enter)
+                    except Exception as e:
+                        print(f"[Alt 转发] {e}")
+        except (AttributeError, RuntimeError):
+            pass
+
     def change_page(self, index):
-        """页面切换时触发"""
         widget = self.stackedWidget.widget(index)
         if not widget:
             return
-
         name = widget.objectName()
+
+        # ★ 新增：离开抓取管理页 → 关闭 spider forum 的 WebView，释放锁
+        if name != "spiderPage":
+            try:
+                self.spider_page.release_preview_lock()
+            except Exception as e:
+                print(f"[change_page] 释放 spider 预览锁失败: {e}")
 
         if name == "linksPage":
             self.links_page.refresh_table()
@@ -307,10 +358,35 @@ class MainApp(FluentWindow):
         QTimer.singleShot(10000, lambda: QApplication.alert(self, 1))  # 10s 兜底停
 
     def closeEvent(self, event):
-        # spontaneous=True  → 用户/系统点了 X 或者 Alt+F4
-        # spontaneous=False → 代码里某处调用了 close() / hide() 之类
         print(f"[退出追踪] MainApp.closeEvent 触发, spontaneous={event.spontaneous()}")
+
+        # 逐个释放，单个失败不影响其他
+        try:
+            for w in self.findChildren(SpiderForumWebView):
+                try:
+                    w.release_lock()
+                except Exception as e:
+                    print(f"[退出] SpiderForumWebView.release_lock 失败: {e}")
+        except Exception as e:
+            print(f"[退出] 遍历 SpiderForumWebView 失败: {e}")
+
+        try:
+            for w in self.findChildren(PickerWebView):
+                try:
+                    w.release_lock()
+                except Exception as e:
+                    print(f"[退出] PickerWebView.release_lock 失败: {e}")
+        except Exception as e:
+            print(f"[退出] 遍历 PickerWebView 失败: {e}")
+
+        # 兜底：无论如何把全局状态归零
+        try:
+            app_state.set_mode("idle")
+        except Exception as e:
+            print(f"[退出] set_mode(idle) 失败: {e}")
+
         super().closeEvent(event)
+
 
 
 if __name__ == "__main__":
@@ -335,6 +411,8 @@ if __name__ == "__main__":
     app.aboutToQuit.connect(lambda: print("[退出追踪] aboutToQuit 触发（Qt 事件循环即将结束）"))
 
     start_ws_server()
+
+    app.aboutToQuit.connect(lambda: app_state.set_mode("idle"))
 
     auto_ok = try_auto_login()
 

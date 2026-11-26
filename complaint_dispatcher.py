@@ -39,8 +39,11 @@ class ComplaintDispatcher(QObject):
     progress_msg = Signal(str)
     batch_success = Signal(object)
     task_finished = Signal()
+    stage_result = Signal(dict)          # ★ 新增：透传阶段结果
 
-    def __init__(self, batches, is_all, target_cat, initial_batch, stop_event, login_event, dialog_signal):
+    def __init__(self, batches, is_all, target_cat, initial_batch,
+                 stop_event, login_event, dialog_signal,
+                 weibo_modes=None):       # ★ 关键：签名补上 weibo_modes
         super().__init__()
         self.batches = batches
         self.is_all = is_all
@@ -50,8 +53,11 @@ class ComplaintDispatcher(QObject):
         self.login_event = login_event
         self.dialog_signal = dialog_signal
 
+        self.weibo_modes = tuple(weibo_modes or ("report", "msg"))   # ★ 这行现在能取到值
+
         self.complaint_signals = AutoComplaintSignals()
         self.complaint_signals.progress.connect(self.progress_msg.emit)
+        self.complaint_signals.stage_result.connect(self.stage_result.emit)  # ★
 
     def _execute_platform(self, batch, is_all_run=False):
         """
@@ -63,10 +69,8 @@ class ComplaintDispatcher(QObject):
         """
         if not batch:
             return False
-
         platform_code = batch[0].get("platform_code", PLATFORM_OTHER)
         run_func = PLATFORM_ROUTER.get(platform_code)
-
         if not run_func:
             self.progress_msg.emit(f"⚠️ 暂未开通【{self.target_cat}】的自动投诉方式")
             return False
@@ -74,19 +78,19 @@ class ComplaintDispatcher(QObject):
         bm = BrowserManager.instance()
         print(f"[Dispatcher] thread={threading.get_ident()} "
               f"bm={id(bm)} bt_tid={bm._bt._tid} "
-              f"pw_tid={bm._pw_thread_id} ctx_tid={bm._context_thread_id}")  # 新增
-        # 整段投递：run_func 内部所有 page 操作都在 BrowserThread 里执行
-        # 内部 bm.new_page() 等调用会因 submit 的重入判断直接原地执行，不会死锁
+              f"pw_tid={bm._pw_thread_id} ctx_tid={bm._context_thread_id}")
+
+        extra_kwargs = {}
+        if platform_code == PLATFORM_WEIBO:  # ★ 仅微博传 modes
+            extra_kwargs["modes"] = self.weibo_modes
+
         return bm.run_in_browser_thread(
-            run_func,
-            batch,
-            signals=self.complaint_signals,
-            is_all=is_all_run,
-            stop_event=self.stop_event,
-            login_event=self.login_event,
+            run_func, batch,
+            signals=self.complaint_signals, is_all=is_all_run,
+            stop_event=self.stop_event, login_event=self.login_event,
             dialog_signal=self.dialog_signal,
-            block=True,
-            timeout=None,   # 投诉流程可能几十分钟（等扫码），不设超时
+            **extra_kwargs,
+            block=True, timeout=None,
         )
 
     def run(self):
@@ -188,6 +192,7 @@ class ComplaintDispatcher(QObject):
             # 执行当前批次
             success = self._execute_platform(batch, is_all_run=True)
 
+            # 用户主动中断：仍要 break
             if success and self.stop_event.is_set():
                 self.progress_msg.emit("⚠️ 用户已强制中断，取消本批标记并停止循环。")
                 has_failure = True
@@ -199,8 +204,8 @@ class ComplaintDispatcher(QObject):
                 time.sleep(3)  # 缓冲时间，防止操作过快
             else:
                 has_failure = True
-                self.progress_msg.emit("本批提交失败或用户中断，全批任务暂停！")
-                break
+                self.progress_msg.emit("❌ 本批失败，已记录，继续下一批...")  # ★ 不再 break
+                time.sleep(2)
 
         return (not has_failure) and (not stopped)
 

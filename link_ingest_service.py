@@ -305,41 +305,44 @@ def organize_pending_links(is_exact_match=False, work_page=None, batch_id=None,
             # ★ 特征值提前提取
             feature_code_1 = extract_pure_feature(first_url)
 
-            # ★ 批内去重：同时看 URL 和 特征值
-            if first_url in processed_first_urls or (feature_code_1 and feature_code_1 in processed_first_features):
-                cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
-                conn.commit()
-                continue
-            processed_first_urls.add(first_url)
-            if feature_code_1:
-                processed_first_features.add(feature_code_1)
+            # ===== manual 数据跳过：批内去重 / 白名单 / 黑名单 / 查重 =====
+            if not is_manual:
+                # 批内去重
+                if first_url in processed_first_urls or (feature_code_1 and feature_code_1 in processed_first_features):
+                    cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))
+                    conn.commit()
+                    continue
+                processed_first_urls.add(first_url)
+                if feature_code_1:
+                    processed_first_features.add(feature_code_1)
 
-            if _hit_whitelist(page_title, source_site_text, first_url):
-                cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
-                               (first_url, first_url, CRAWL_STATUS_WHITELIST, db_id))
-                conn.commit()
-                whitelist_skipped += 1
-                continue
+                # 白名单
+                if _hit_whitelist(page_title, source_site_text, first_url):
+                    cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                                   (first_url, first_url, CRAWL_STATUS_WHITELIST, db_id))
+                    conn.commit()
+                    whitelist_skipped += 1
+                    continue
 
-            # ★ 黑名单校验传特征值
-            if _is_blacklisted(cursor, first_url, feature_code_1, "first"):
-                cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
-                               (first_url, first_url, CRAWL_STATUS_IGNORED, db_id))
-                conn.commit()
-                blacklist_skipped += 1
-                continue
+                # 黑名单
+                if _is_blacklisted(cursor, first_url, feature_code_1, "first"):
+                    cursor.execute("UPDATE draft_links SET first_url = ?, site_url = ?, crawl_status = ? WHERE id = ?",
+                                   (first_url, first_url, CRAWL_STATUS_IGNORED, db_id))
+                    conn.commit()
+                    blacklist_skipped += 1
+                    continue
 
-            # 查库去重
-            dup_id_1 = _find_duplicate_by_stage(cursor, first_url, "first", feature_code_1)
-            if dup_id_1:
-                cursor.execute(
-                    "UPDATE draft_links SET first_url = ?, site_url = ?, feature_code = ?, crawl_status = ?, "
-                    "duplicate_of_id = ?, duplicate_of_table = 'sites' WHERE id = ?",
-                    (first_url, first_url, feature_code_1, CRAWL_STATUS_DUPLICATE, dup_id_1, db_id)
-                )
-                conn.commit()
-                duplicate_count += 1
-                continue
+                # 查库去重
+                dup_id_1 = _find_duplicate_by_stage(cursor, first_url, "first", feature_code_1)
+                if dup_id_1:
+                    cursor.execute(
+                        "UPDATE draft_links SET first_url = ?, site_url = ?, feature_code = ?, crawl_status = ?, "
+                        "duplicate_of_id = ?, duplicate_of_table = 'sites' WHERE id = ?",
+                        (first_url, first_url, feature_code_1, CRAWL_STATUS_DUPLICATE, dup_id_1, db_id)
+                    )
+                    conn.commit()
+                    duplicate_count += 1
+                    continue
 
             # ================= 阶段 2 =================
             final_url = first_url
@@ -500,7 +503,7 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
 
                 try:
                     cursor.execute(
-                        "INSERT INTO sites (category, target_platform, site_url, name, original_title, body_text, "
+                        "INSERT OR IGNORE INTO sites (category, target_platform, site_url, name, original_title, body_text, "
                         "  attr, feature_code, book_id, book_name, "
                         "  source_platform, source_keyword, source_url, fetch_time, "
                         "  batch_id, domain_matched, parent_url, parent_title, is_mobile, first_url, second_url) "
@@ -511,7 +514,9 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                          1 if target_platform else 0, parent_url, parent_title, is_mobile,
                          first_url, second_url)
                     )
-                    inserted_count += 1
+                    if cursor.rowcount > 0:
+                        inserted_count += 1
+                    # rowcount == 0：已在库，静默跳过（draft 照常删）
                 except sqlite3.IntegrityError:
                     pass
                 cursor.execute("DELETE FROM draft_links WHERE id = ?", (db_id,))

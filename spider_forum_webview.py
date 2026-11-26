@@ -89,13 +89,36 @@ class SpiderForumWebView(QWidget):
         self._picker.load_url(url)
         return True
 
+    def reset_preview(self):
+        """切页离开时调用：彻底关闭 picker，释放锁，恢复占位。中/右列数据不受影响。"""
+        if self._picker is None:
+            return
+        picker = self._picker
+        self._picker = None
+
+        try:
+            picker.destroy_picker()  # deregister bridge + about:blank
+        except Exception as e:
+            print(f"[ForumWebView] destroy_picker 失败: {e}")
+        try:
+            picker.release_lock()  # 清 app_state 全局锁
+        except Exception as e:
+            print(f"[ForumWebView] release_lock 失败: {e}")
+
+        try:
+            self.layout().removeWidget(picker)
+        except Exception:
+            pass
+        picker.deleteLater()
+
+        try:
+            self._placeholder.show()
+        except RuntimeError:
+            pass
+
     def release_lock(self):
-        if self._picker is not None:
-            try:
-                self._picker.destroy_picker()
-            except Exception:
-                pass
-            self._picker.release_lock()
+        # closeEvent / 退出路径也用同一套彻底清理
+        self.reset_preview()
 
     # ---------- 内部：延迟创建 ----------
     def _ensure_picker(self) -> bool:
@@ -123,7 +146,6 @@ class SpiderForumWebView(QWidget):
         picker.saved_page.connect(self.saved_page.emit)
         picker.batch_saved.connect(self.batch_saved.emit)
 
-        # ================= 新增：网页缩放 80% =================
         ZOOM_FACTOR = 0.8
 
         def _apply_zoom(_ok=None):
@@ -138,14 +160,12 @@ class SpiderForumWebView(QWidget):
 
         picker.web_view.loadStarted.connect(_apply_zoom)
         picker.web_view.loadFinished.connect(_apply_zoom)
-        # ======================================================
 
-        # 替换占位提示
-        self.layout().removeWidget(self._placeholder)
-        self._placeholder.deleteLater()
+        # ★ 改：只 hide，不 remove + deleteLater（否则切回来无法恢复占位）
+        self._placeholder.hide()
         self.layout().addWidget(picker)
-
         self._picker = picker
+        return True
 
     def closeEvent(self, event):
         self.release_lock()

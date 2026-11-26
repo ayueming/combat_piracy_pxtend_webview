@@ -4,14 +4,10 @@
 三列布局：
   左：SpiderForumWebView（双击中列任意行 → 在此预览）
   中：可预览链接列表（sites 表里 MODULE_FORUM ∪ MODULE_PANSITE 分类）
-  右：拾取结果面板（draft_links 里 batch_id=SPIDER_FORUM_PICK 的草稿，
+  右：拾取结果面板（全库 draft_links 中 pick_origin='手动获取' 且 crawl_status != PENDING 的记录，
       复用 search_result_panel 的 CardListWidget + DataCard）
+拾取按钮（解析本次拾取）：全库 manual 中存在 PENDING 时可用，触发 trigger_parse(None, only_manual=True)
 
-拾取流程：
-  用户在左列 picker 里点击"手动拾取 / 仅保存 / 解析本次拾取"
-    → PickerJsBridge → save_picked_link → draft_links(SPIDER_FORUM_PICK)
-    → PickerWebView 信号回传 → 这里刷新右列
-    → 卡片按钮（入库/永删/忽略）复用 archive_batch_by_ids
 """
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
@@ -26,6 +22,7 @@ from app_data.complaint_platform_consts import (
 from app_data import ALL_SUB_PLATFORMS
 from db_config import get_conn
 from mobile_url_utils import resolve_is_mobile
+from ws_server import ws_signals
 
 from ui_styles import ROW_SELECTED_BG, TABLE_HEADER_BASE
 from ui_components import (
@@ -42,6 +39,7 @@ from parser_service import parser_signals, trigger_parse
 
 from spider_forum_webview import SpiderForumWebView, FORUM_PICK_BATCH_ID
 from license_manager import license_mgr
+from ui_card_base import get_card_status
 
 
 # ============ 模块 → 分类映射 ============
@@ -122,6 +120,18 @@ class SpiderForumResultPanel(QWidget):
         self.setup_ui()
 
         parser_signals.parse_finished.connect(self._on_parse_finished)
+        # ★ 新增：单条解析完成 → 刷新卡片
+        parser_signals.parse_single_finished.connect(self._on_single_parse_finished)
+        # ★ 可选：其他入口（搜索抓取、批量入库）插入数据时也刷新
+        ws_signals.new_data_inserted.connect(self._on_any_new_data)
+
+    def _on_any_new_data(self, _count):
+        self.refresh_tables()
+
+    def _on_single_parse_finished(self, success, db_id):
+        self.refresh_tables()
+        if not success:
+            ToastLabel(self, "⚠️ 单条解析失败，已留在待解析", "#F59E0B")
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -174,35 +184,52 @@ class SpiderForumResultPanel(QWidget):
     # ---------- 刷新 ----------
     def refresh_tables(self):
         self._load_books()
+
         try:
-            tables = get_batch_tables(FORUM_PICK_BATCH_ID)
+            all_tables = get_batch_tables("ALL")
         except Exception as e:
-            print(f"[ForumPanel] 查询草稿失败: {e}")
-            return
+            print(f"[ForumPanel] 全库查询失败: {e}")
+            all_tables = {}
 
-        records = list(tables.get("tab1_todo", [])) + list(tables.get("tab2_pending", []))
+        # ---- 1. 卡片：全库所有 manual，且 crawl_status != PENDING ----
+        all_records = (
+                list(all_tables.get("tab1_todo", []))
+                + list(all_tables.get("tab2_pending", []))
+                + list(all_tables.get("tab3_archive", []))
+        )
+        records = [
+            r for r in all_records
+            if len(r) > 13
+               and r[13] == "手动获取"
+               and get_card_status(r) != "待解析"
+        ]
 
-        # ★ 只看手动拾取（picker 里"手动拾取链接 / 仅保存当前网址"两条路径）
-        #   record[13] 是 pick_origin，与 BaseCard.is_manual 同源
-        records = [r for r in records if len(r) > 13 and r[13] == "手动获取"]
-
-        # 去重（同一 id 可能同时落两个 tab）
         seen, uniq = set(), []
         for r in records:
             if r[0] in seen:
                 continue
             seen.add(r[0])
             uniq.append(r)
-
         self.card_list.set_data(uniq)
-        self.btn_parse.setEnabled(bool(uniq))
+
+        # ---- 2. 按钮：全库 manual 中存在 PENDING ----
+        has_pending_manual = any(
+            len(r) > 13
+            and r[13] == "手动获取"
+            and get_card_status(r) == "待解析"
+            for r in all_tables.get("tab2_pending", [])
+        )
+        self.btn_parse.setEnabled(has_pending_manual)
 
     # ---------- 卡片动作 ----------
     def _card_action(self, card_widget, db_id, action_data, action_type):
         if action_type == "keep":
             category = action_data.split(":")[1] if action_data and ":" in action_data else "其他"
-            archive_batch_by_ids([(db_id, category)], [], [])
-            ToastLabel(self, "✅ 已成功入库", "#10B981")
+            inserted, _, _ = archive_batch_by_ids([(db_id, category)], [], [])
+            if inserted > 0:
+                ToastLabel(self, "✅ 已成功入库", "#10B981")
+            else:
+                ToastLabel(self, "ℹ️ 该链接已在库，已跳过", "#6B7280")
         elif action_type == "black":
             archive_batch_by_ids([], [], [db_id])
             ToastLabel(self, "🚫 已加入黑名单", "#EF4444")
@@ -237,20 +264,18 @@ class SpiderForumResultPanel(QWidget):
         self.btn_parse.setText("解析中...")
         self.btn_parse.setEnabled(False)
         try:
-            trigger_parse(FORUM_PICK_BATCH_ID, only_manual=True)
+            # 全库、只解析手动拾取的 pending
+            trigger_parse(None, only_manual=True)
         except Exception as e:
             print(f"[ForumPanel] 触发解析失败: {e}")
             self.parent_page._is_background_parsing = False
             self.btn_parse.setText("解析本次拾取")
-            self.btn_parse.setEnabled(True)
+            self.refresh_tables()
 
     def _on_parse_finished(self, success, batch_id=None):
         self.parent_page._is_background_parsing = False
         self.btn_parse.setText("解析本次拾取")
-        self.btn_parse.setEnabled(True)
         self.refresh_tables()
-        if success:
-            ToastLabel(self, "✅ 解析完成", "#10B981")
 
 
 # =========================================================================
@@ -320,6 +345,10 @@ class SpiderForumPage(QWidget):
         self.webview.picked.connect(lambda _rec: self.result_panel.refresh_tables())
         self.webview.saved_page.connect(lambda _rec: self.result_panel.refresh_tables())
         self.webview.batch_saved.connect(lambda _bid: self.result_panel.refresh_tables())
+
+    def release_preview_lock(self):
+        """离开本页时调用：关闭左列 WebView、释放全局锁。中/右列数据保留。"""
+        self.webview.reset_preview()
 
     # ---------- 中列数据 ----------
     def refresh_data(self):

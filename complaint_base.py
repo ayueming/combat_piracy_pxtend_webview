@@ -14,6 +14,7 @@ from complaint_common import take_error_screenshot
 
 class AutoComplaintSignals(QObject):
     progress = Signal(str)
+    stage_result = Signal(dict)  #阶段结果结构化信号
 
     def __init__(self):
         super().__init__()
@@ -22,14 +23,19 @@ class AutoComplaintSignals(QObject):
 
 
 class BaseComplaintRunner:
-    def __init__(self, complaints_data, signals=None, is_all=False, stop_event=None, login_event=None,
-                 dialog_signal=None):
+    def __init__(self, complaints_data, signals=None, is_all=False, stop_event=None,
+                 login_event=None, dialog_signal=None,
+                 expected_uid=None, expected_nickname=None):
         self.complaints_data = complaints_data
         self.signals = signals or AutoComplaintSignals()
         self.is_all = is_all
         self.stop_event = stop_event
         self.login_event = login_event
         self.dialog_signal = dialog_signal
+
+        # ★ 通用登录账号校验参数（None 表示不校验）
+        self.expected_uid = str(expected_uid).strip() if expected_uid else None
+        self.expected_nickname = (expected_nickname or "").strip() or None
 
         # 1. 系统级校验
         self.user_id = get_current_user()
@@ -145,6 +151,26 @@ class BaseComplaintRunner:
         ★ 抽象方法：子类必须实现，返回 True 表示已登录，False 表示未登录/掉线
         """
         raise NotImplementedError("子类必须实现 check_platform_login")
+
+    def _match_expected_user(self, actual_uid="", actual_nickname="") -> bool:
+        """
+        通用登录账号校验。
+        - 两个期望都为空 → 直接 True（老调用不受影响）
+        - expected_uid 有值 → uid 必须相等（字符串比较，统一 int/str）
+        - expected_nickname 有值 → 仅当 actual_nickname 非空时比对，
+          取不到昵称时放行（避免平台拿不到昵称误判）
+        """
+        if self.expected_uid:
+            if str(actual_uid or "").strip() != self.expected_uid:
+                self.log(f"⚠️ 登录账号不匹配：实际 uid={actual_uid}，期望 uid={self.expected_uid}")
+                return False
+
+        if self.expected_nickname and actual_nickname:
+            if actual_nickname.strip() != self.expected_nickname:
+                self.log(f"⚠️ 登录昵称不匹配：实际={actual_nickname}，期望={self.expected_nickname}")
+                return False
+
+        return True
 
     def wait_for_login(self, timeout_sec=300, reload_on_event=True):
         self.log("⏳ 正在检查账号登录状态...")

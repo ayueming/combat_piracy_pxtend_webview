@@ -717,8 +717,11 @@ class SearchResultPanel(QWidget):
     def _card_action(self, card_widget, db_id, action_data, action_type):
         if action_type == "keep":
             category = action_data.split(":")[1] if action_data and ":" in action_data else "其他"
-            archive_batch_by_ids([(db_id, category)], [], [])
-            ToastLabel(self, "✅ 已成功入库", "#10B981")
+            inserted, _, _ = archive_batch_by_ids([(db_id, category)], [], [])
+            if inserted > 0:
+                ToastLabel(self, "✅ 已成功入库", "#10B981")
+            else:
+                ToastLabel(self, "ℹ️ 该链接已在库，已跳过", "#6B7280")
         elif action_type == "black":
             archive_batch_by_ids([], [], [db_id])
             ToastLabel(self, "🚫 已加入黑名单", "#EF4444")
