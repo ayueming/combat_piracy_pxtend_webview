@@ -77,6 +77,14 @@ SEARCH_TEMPLATES = {
         "is_mobile": False,
         "note": "网盘聚合搜索",
     },
+    "短剧搜": {
+        "template": "https://www.duanjuso.cc/search?q={kw}&exact=true",
+        "mode": "direct",
+        "exact_support": "none",
+        "real_platform": "短剧搜",
+        "is_mobile": False,
+        "note": "网盘聚合搜索",
+    },
     "爱搜": {
         "template": "https://www.esoua.com/search?q={kw}&exact=true",
         "mode": "direct",
@@ -101,6 +109,14 @@ SEARCH_TEMPLATES = {
         "is_mobile": False,
         "note": "微博综合搜索",
     },
+    "微博搜索(收藏夹)": {
+            "template": "https://weibo.com/u/favorites?page=1",
+            "mode": "direct",
+            "exact_support": "none",   # 微博双引号精确搜索不稳定，建议先 none；需要再加 quote
+            "real_platform": "微博",
+            "is_mobile": False,
+            "note": "仅打开当前账号收藏夹，不按关键词过滤",
+        },
     # "短剧搜": {
         # "template": "https://www.duanjuso.cc/search?q={kw}",
         # "mode": "direct",

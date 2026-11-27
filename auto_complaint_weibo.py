@@ -76,7 +76,7 @@ class WeiboComplaintRunner(BaseComplaintRunner):
         url = item.get("url", "")
         tmp = None
         try:
-            tmp = self.page.context.new_page()
+            tmp = self.new_owned_page(activate=False)
             tmp.goto(url, wait_until="domcontentloaded", timeout=20000)
             tmp.wait_for_timeout(2500)
 
@@ -118,7 +118,7 @@ class WeiboComplaintRunner(BaseComplaintRunner):
             return ""
         finally:
             if tmp and not tmp.is_closed():
-                tmp.close()
+                self.close_owned_page(tmp)
 
     # ============ 阶段一：举报 ============
     def _do_report(self, rid: str):
@@ -387,8 +387,9 @@ class WeiboComplaintRunner(BaseComplaintRunner):
             return "FAILED"
         finally:
             if dm_page and not dm_page.is_closed():
-                dm_page.close()
+                self.close_owned_page(dm_page)
             self.page = original_page
+            self.bring_browser_to_front()  # 恢复主页面并抢前台
             try:
                 self.page.bring_to_front()
             except Exception:

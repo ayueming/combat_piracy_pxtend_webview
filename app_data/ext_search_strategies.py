@@ -152,6 +152,34 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": []
         }
     },
+    "短剧搜": {
+        "mode": "click",
+        "scanner": "generic",
+        "base_url": "https://www.duanjuso.cc",
+
+        # 一阶段：搜索列表页
+        "resultSelector": "article._search-item_816kt_65",
+        "titleSelector": "a._search-item-title_816kt_112",
+        "bodySelector": "._search-item-info_816kt_115",
+        "sourceSelector": "._search-item-logo_816kt_150",
+        "nextBtnSelector": "li.semi-page-next:not(.semi-page-item-disabled)",
+
+        "urlExtract": {
+            "rules": [
+                {"selector": "a._search-item-title_816kt_112", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        },
+
+        # 二阶段：详情页剥壳，拿到真实网盘链接
+        "detailExtract": {
+            "wait_selector": "a._jump-link_hcpgj_231",
+            "rules": [
+                {"selector": "a._jump-link_hcpgj_231", "attr": "href"}
+            ],
+            "blacklist_patterns": []
+        }
+    },
     "爱搜": {
         "mode": "click",
         "scanner": "generic",
@@ -212,7 +240,7 @@ EXT_SEARCH_STRATEGIES = {
         "resultSelector": "div[action-type='feed_list_item'][mid]",
         "titleSelector": ".info a.name",
         "bodySelector": "p[node-type='feed_list_content']",
-        "sourceSelector": ".from > a:first-child",   # 取时间
+        "sourceSelector": ".info a.name",   # 同title，取发布者
         "nextBtnSelector": ".m-page2 a.next:not(.disabled)",
         "urlExtract": {
             "rules": [
@@ -234,6 +262,33 @@ EXT_SEARCH_STRATEGIES = {
             "blacklist_patterns": [],
         },
     },
+    "微博搜索(收藏夹)": {
+        "mode": "scroll",
+        "scanner": "generic",
+        "base_url": "",  # 当前 href 是绝对 https，注意别重复拼 https:
+        "resultSelector": "div[class*='_feedItem_'] article",
+        "titleSelector": "header a span[title], header span[title]",
+        "bodySelector": "div[class*='_wbtext_']",
+        "expandSelector": "div[class*='_wbtext_'] span.expand",
+        "sourceSelector": "header a span[title], header span[title]",
+        "nextBtnSelector": None,
+        "urlExtract": {
+            "rules": [
+                {"selector": "a[class*='_time_']", "attr": "href"}
+            ],
+            "blacklist_patterns": [
+                "javascript:",
+                "weibo.com/u/",
+                "weibo.com/at/",
+                "weibo.com/weibo?q=",
+                "s.weibo.com/weibo?q=",
+                "huati.weibo.com/k/",
+                "passport.weibo",
+                "login.sina",
+            ],
+        },
+        "detailExtract": {"rules": [], "blacklist_patterns": []},
+    }
 }
 
 

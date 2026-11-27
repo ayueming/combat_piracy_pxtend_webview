@@ -41,6 +41,7 @@ class BaiduComplaintRunner(BaseComplaintRunner):
         self.log("👉 您可以手动接管完成后续操作，或者直接点击小窗右上角的 X，程序会自动结束。")
 
         self.take_screenshot()
+        self.bring_browser_to_front()
 
         while True:
             if self.stop_event and self.stop_event.is_set():
@@ -215,6 +216,7 @@ class BaiduComplaintRunner(BaseComplaintRunner):
 
         self.log("👉 【需要人工干预】请在弹出的页面中扫码进行身份验证！")
         self.log("扫码成功后，脚本将自动继续并提交...")
+        self.bring_browser_to_front()  #把二维码页拉到最前
 
         max_wait = 600
         waited = 0

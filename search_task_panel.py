@@ -1,6 +1,8 @@
 # search_task_panel.py
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QScrollArea, QFrame, QMessageBox)
+                               QPushButton, QScrollArea, QFrame, QMessageBox,
+                               QComboBox)
 from PySide6.QtCore import Qt
 from search_task_queue import task_queue, queue_signals
 
@@ -144,6 +146,28 @@ class SearchTaskPanel(QWidget):
         self.lbl_queue_title = QLabel("📋 搜索队列 (0)")
         self.lbl_queue_title.setStyleSheet("font-weight: bold; color: #374151; font-size: 13px;")
         header.addWidget(self.lbl_queue_title)
+
+        # ★ 作品筛选下拉
+        self.book_filter_combo = QComboBox()
+        self.book_filter_combo.setFixedWidth(120)
+        self.book_filter_combo.setStyleSheet("""
+            QComboBox { border: 1px solid #E5E7EB; border-radius: 4px;
+                        padding: 2px 8px; background: #FFF;
+                        font-size: 12px; color: #374151; }
+            QComboBox:hover { border: 1px solid #D1D5DB; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 3px solid transparent;
+                border-right: 3px solid transparent;
+                border-top: 4px solid #6B7280;
+                width: 0; height: 0; margin-right: 4px;
+            }
+        """)
+        self.book_filter_combo.addItem("全部作品", None)  # None 代表"全部"
+        self.book_filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        header.addWidget(self.book_filter_combo)
+
         header.addStretch()
 
         self.btn_add = QPushButton("＋ 添加")
@@ -198,17 +222,49 @@ class SearchTaskPanel(QWidget):
         self.scroll.setWidget(self.list_container)
         lay.addWidget(self.scroll, 1)
 
+    def _on_filter_changed(self, _idx):
+        self.refresh_list()
+
+    def _rebuild_book_filter(self, tasks):
+        """根据当前队列重建下拉，保留原选中项；选中的作品已被清空则回落到“全部”。"""
+        current = self.book_filter_combo.currentData()
+        self.book_filter_combo.blockSignals(True)
+        self.book_filter_combo.clear()
+        self.book_filter_combo.addItem("全部作品", None)
+        seen = set()
+        for t in tasks:
+            bid = t.get("book_id")
+            if bid in seen:
+                continue
+            seen.add(bid)
+            self.book_filter_combo.addItem(t.get("book_name") or f"作品{bid}", bid)
+        idx = self.book_filter_combo.findData(current)
+        self.book_filter_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.book_filter_combo.blockSignals(False)
+
     def refresh_list(self):
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        tasks = task_queue.get_tasks()
-        self.lbl_queue_title.setText(f"📋 搜索队列 ({len(tasks)})")
+        all_tasks = task_queue.get_tasks()
+
+        # ★ 重建下拉（保留用户当前选择）
+        self._rebuild_book_filter(all_tasks)
+
+        # ★ 应用筛选
+        selected_bid = self.book_filter_combo.currentData()  # None = 全部
+        if selected_bid is None:
+            tasks = all_tasks
+            self.lbl_queue_title.setText(f"📋 搜索队列 ({len(all_tasks)})")
+        else:
+            tasks = [t for t in all_tasks if t.get("book_id") == selected_bid]
+            self.lbl_queue_title.setText(f"📋 搜索队列 ({len(tasks)}/{len(all_tasks)})")
 
         if not tasks:
-            lbl = QLabel("队列为空，请配置搜索项后点击「添加」")
+            lbl = QLabel("当前筛选下没有任务" if selected_bid is not None
+                         else "队列为空，请配置搜索项后点击「添加」")
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setStyleSheet("color: #9CA3AF; font-size: 12px; margin-top: 20px;")
             self.list_layout.addWidget(lbl)
@@ -221,11 +277,13 @@ class SearchTaskPanel(QWidget):
             self.btn_add.hide()
             self.lbl_div.hide()
             self.btn_stop.show()
+            self.book_filter_combo.setEnabled(False)  # ★ 运行时禁用，避免误改
         else:
             self.btn_run_all.show()
             self.btn_stop.hide()
             self.btn_add.show()
             self.lbl_div.show()
+            self.book_filter_combo.setEnabled(True)
 
     def _add_current(self):
         if not self.main_page: return
@@ -251,7 +309,18 @@ class SearchTaskPanel(QWidget):
             )
 
     def _run_all(self):
-        task_queue.start_all()  # 内部做 is_running、空队列、草稿检查，失败自己弹窗
+        bid = self.book_filter_combo.currentData()  # None = 全部
+        if bid is None:
+            task_queue.start_all()
+            return
+
+        # 先校验筛选结果非空，给用户明确反馈
+        visible = [t for t in task_queue.get_tasks() if t.get("book_id") == bid]
+        if not visible:
+            QMessageBox.information(self, "提示", "当前筛选下没有可执行的任务。")
+            return
+
+        task_queue.start_all(task_filter=lambda t: t.get("book_id") == bid)
 
     def _on_batch_switched(self, batch_id, book_name):
         if not self.main_page: return

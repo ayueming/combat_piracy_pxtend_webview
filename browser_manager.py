@@ -115,8 +115,8 @@ class BrowserManager:
         except Exception as e:
             print(f"[BrowserManager] ensure_started 失败: {e}")
 
-    def new_page(self, url=None, force_new=False):
-        return self._bt.submit(self._new_page_impl, url, force_new)
+    def new_page(self, url=None, force_new=False, activate=True):
+        return self._bt.submit(self._new_page_impl, url, force_new, activate)
 
     # ================= 核心接管逻辑 =================
 
@@ -232,18 +232,27 @@ class BrowserManager:
                 raise
 
     def _patch_page(self, page):
-        """★ 核心防御：给所有 Playwright 创建的页面打上防弹窗补丁"""
         try:
-            # 1. 拦截所有 alert/confirm/prompt 弹窗，直接自动关闭
-            page.on("dialog", lambda dialog: dialog.dismiss())
-
-            # 2. 注入 JS，物理阉割网页的弹窗能力
-            page.add_init_script("""
-                window.open = function() { return null; };
-                window.alert = function() { return; };
-                window.confirm = function() { return false; };
-                window.prompt = function() { return null; };
-            """)
+            # ★ 已打过补丁就跳过
+            if getattr(page, "_bm_patched", False):
+                return
+            try:
+                page.on("dialog", lambda dialog: dialog.dismiss())
+            except Exception:
+                pass
+            try:
+                page.add_init_script("""
+                    window.open = function() { return null; };
+                    window.alert = function() { return; };
+                    window.confirm = function() { return false; };
+                    window.prompt = function() { return null; };
+                """)
+            except Exception:
+                pass
+            try:
+                page._bm_patched = True
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️ [BM] 注入防弹窗脚本失败: {e}")
 
@@ -281,10 +290,9 @@ class BrowserManager:
                 return page
             raise
 
-    def _new_page_impl(self, url=None, force_new=False):
+    def _new_page_impl(self, url=None, force_new=False, activate=True):
         self._ensure_started_impl(minimized=False)
         page = None
-
         if not force_new:
             for p in self._context.pages:
                 try:
@@ -293,13 +301,12 @@ class BrowserManager:
                         break
                 except Exception:
                     pass
-
         if page is None:
             page = self._safe_new_page()
         else:
-            self._patch_page(page)  # ★ 新增：复用的旧页面也要打补丁
-
-        self._force_activate(page)
+            self._patch_page(page)
+        if activate:
+            self._force_activate(page)
         if url:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -307,7 +314,59 @@ class BrowserManager:
                 print(f"页面加载超时: {e}")
         return page
 
-    def _force_activate(self, page):
+    def close_page(self, page):
+        """线程安全地关闭指定页；已关闭/已失效则静默返回"""
+        return self._bt.submit(self._close_page_impl, page)
+
+    def _close_page_impl(self, page):
+        if not page:
+            return
+        try:
+            if not page.is_closed():
+                page.close()
+        except Exception as e:
+            print(f"[BM.close_page] 关闭失败: {e}")
+
+    def close_pages(self, pages):
+        """批量关闭（一次投递，减少线程切换）"""
+        return self._bt.submit(self._close_pages_impl, list(pages or []))
+
+    def _close_pages_impl(self, pages):
+        if not pages:
+            return
+        # 先过滤掉已关闭的
+        alive = [p for p in pages if p and not self._is_page_closed(p)]
+        if not alive:
+            return
+
+        # context 现有存活页面
+        current = [p for p in self._context.pages if not self._is_page_closed(p)]
+        # 如果关闭后一个都不剩 → 保留一个根页面，改为 goto about:blank
+        if len(current) - len([p for p in alive if p in current]) <= 0:
+            keeper = alive[0]
+            others = alive[1:]
+            try:
+                keeper.goto("about:blank", timeout=5000)
+            except Exception as e:
+                print(f"[BM.close_pages] 根页面 reset 失败: {e}")
+            for p in others:
+                self._close_page_impl(p)
+            print("[BM.close_pages] 已保留一个根页面（goto about:blank），避免关闭窗口")
+            return
+
+        # 正常关闭
+        for p in alive:
+            self._close_page_impl(p)
+
+    @staticmethod
+    def _is_page_closed(p):
+        try:
+            return p.is_closed()
+        except Exception:
+            return True
+
+    def _force_activate(self, page, os_level=False):
+        """Playwright 层激活（轻量，无副作用）"""
         try:
             page.bring_to_front()
         except Exception:
@@ -322,6 +381,47 @@ class BrowserManager:
             pass
         try:
             page.evaluate("window.focus()")
+        except Exception:
+            pass
+
+        if not os_level:
+            return
+
+        # ↓↓↓ OS 级（只在显式要求时执行）↓↓↓
+        try:
+            import sys
+            if sys.platform == "win32":
+                import ctypes
+                # 经典 Alt 键释放前台锁，然后找 Chrome/Edge 窗口提到最前
+                ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)  # Alt down
+                ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)  # Alt up
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                # 前台已经是浏览器就不折腾
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+                if not any(k in buf.value for k in ("Chrome", "Edge", "Chromium")):
+                    # 枚举窗口找浏览器
+                    from ctypes import wintypes
+                    found = []
+
+                    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+                    def _cb(h, _):
+                        if not ctypes.windll.user32.IsWindowVisible(h):
+                            return True
+                        l = ctypes.windll.user32.GetWindowTextLengthW(h)
+                        if l == 0:
+                            return True
+                        b = ctypes.create_unicode_buffer(l + 1)
+                        ctypes.windll.user32.GetWindowTextW(h, b, l + 1)
+                        if any(k in b.value for k in ("Chrome", "Edge", "Chromium")):
+                            found.append(h)
+                        return True
+
+                    ctypes.windll.user32.EnumWindows(_cb, 0)
+                    for h in found:
+                        ctypes.windll.user32.ShowWindow(h, 9)  # SW_RESTORE
+                        ctypes.windll.user32.SetForegroundWindow(h)
+                        break
         except Exception:
             pass
 
@@ -396,3 +496,37 @@ class BrowserManager:
                 print(f"[BM.open_isolated_mobile_page] 关闭 context 失败: {e}")
 
         return page, cleanup
+
+    def bring_to_front(self, page=None):
+        """
+        把浏览器窗口/标签页抢到前台（线程安全，可在任意线程调用）。
+        - page 为 None 时，激活 context 下所有页面（择一即激活窗口）
+        - 失败不抛异常，仅打印日志
+        """
+        try:
+            return self._bt.submit(self._bring_to_front_impl, page)
+        except Exception as e:
+            print(f"[BM.bring_to_front] 投递失败: {e}")
+            return None
+
+    def _bring_to_front_impl(self, page=None):
+        try:
+            self._ensure_started_impl(minimized=False)
+        except Exception:
+            return
+        if self._context is None:
+            return
+
+        # ★ 只激活一个页面就够，不要循环
+        target = None
+        if page is not None:
+            if page and not self._is_page_closed(page):
+                target = page
+        else:
+            for p in self._context.pages:
+                if not self._is_page_closed(p):
+                    target = p
+                    break
+
+        if target:
+            self._force_activate(target, os_level=True)  # ★ 只有显式 bring_to_front 才打 OS

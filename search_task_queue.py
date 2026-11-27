@@ -188,22 +188,41 @@ class SearchTaskQueue(QObject):
         return True
 
     # ---------------- 启动 ----------------
-    def start_all(self):
-        """跑队列全部。返回 True 表示已启动，False 表示被拦下（已弹过窗）。"""
+    def start_all(self, task_filter=None):
+        """跑队列（可带筛选）。返回 True 表示已启动，False 表示被拦下。
+        task_filter: 可选，接收 task dict，返回 bool 的函数。
+        """
         if self.is_running:
             QMessageBox.information(None, "提示", "队列中已有任务正在执行，请等待完成。")
             return False
 
         tasks = self.get_tasks()
+        if task_filter is not None:
+            tasks = [t for t in tasks if task_filter(t)]
         if not tasks:
+            # 静默返回，弹窗责任交给调用方（面板已做过预检查）
             return False
 
         if not self._check_drafts_or_warn():
             return False
 
+        # ★ 只重置本次要跑的任务状态，避免污染其它筛选下的 failed/stopped
         conn = get_conn()
         try:
-            conn.execute("UPDATE search_tasks SET status = 'ready' WHERE status IN ('failed', 'stopped')")
+            if task_filter is None:
+                conn.execute(
+                    "UPDATE search_tasks SET status = 'ready' "
+                    "WHERE status IN ('failed', 'stopped')"
+                )
+            else:
+                ids = [t["id"] for t in tasks if t.get("id") is not None]
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    conn.execute(
+                        f"UPDATE search_tasks SET status = 'ready' "
+                        f"WHERE id IN ({placeholders}) AND status IN ('failed', 'stopped')",
+                        ids,
+                    )
             conn.commit()
         finally:
             conn.close()
@@ -212,7 +231,7 @@ class SearchTaskQueue(QObject):
         self._session_batch_id = f"QUEUE_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self._ui_notified_batch = None
 
-        self._running_tasks = tasks                    # ★ list[dict]
+        self._running_tasks = tasks  # ★ 已是筛选后的 list[dict]
         self.is_running = True
         self._execute_next()
         return True

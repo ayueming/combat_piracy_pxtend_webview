@@ -59,6 +59,7 @@ PLATFORM_CONFIG = {
         # ★ 纯人工分类入口，不承接自动域名匹配。
         ("其他", PLATFORM_OTHER, MODULE_OTHER, "其他", []),
         ("爱网盘", PLATFORM_OTHER, MODULE_PANSITE, "爱网盘", []),
+        ("短剧搜", PLATFORM_OTHER, MODULE_PANSITE, "短剧搜", []),
         ("爱搜", PLATFORM_OTHER, MODULE_PANSITE, "爱搜", []),
         ("影盘社", PLATFORM_OTHER, MODULE_PANSITE, "影盘社", []),
 
@@ -84,6 +85,7 @@ PLATFORM_DOMAINS = {
     "爱网盘": ["iwangpan.cc"],
     "爱搜": ["esoua.com"],
     "影盘社": ["melost.cn"],
+    "短剧搜": ["duanjuso.cc"],
     "微博": ["weibo.com", "weibo.cn"],
     # ★ 暂未开通：有明确域名但业务未开通，统一归入“暂未开通”分类。
     #   以后某个域名开通了业务，就从这里移出，在 PLATFORM_CONFIG 注册正式子分类并加入上方对应位置。

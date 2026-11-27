@@ -63,7 +63,7 @@ from app_data.link_columns import (
 
 
 TABLE_HEADERS = [
-    "勾选", "关联作品(必填)", "资源分类(必填)", "资源链接(必填)", "网站域名",
+    "勾选", "关联作品(必填)", "资源分类(必填)", "资源链接(必填)", "发布者/域名",
     "属性", "特征码", "抓取状态", "拾取状态", "投诉时间", "资源状态", "标题",
 ]
 
@@ -164,7 +164,7 @@ class ImportLinksDialog(QDialog):
             ws = wb.active
             ws.title = "盗版链接"
 
-            headers = ["关联作品(必填)", "资源分类", "资源链接(必填)", "网站域名", "属性", "投诉时间", "状态"]
+            headers = ["关联作品(必填)", "资源分类", "资源链接(必填)", "发布者/域名", "属性", "投诉时间", "状态"]
             for col, header in enumerate(headers, 1):
                 ws.cell(row=1, column=col, value=header)
 
@@ -612,7 +612,7 @@ class LinksPage(QWidget):
             ws = wb.active
             ws.title = "盗版链接"
 
-            headers = ["关联作品(必填)", "资源分类", "资源链接(必填)", "网站域名", "属性", "投诉时间", "状态"]
+            headers = ["关联作品(必填)", "资源分类", "资源链接(必填)", "发布者/域名", "属性", "投诉时间", "状态"]
             for col_idx, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col_idx, value=header)
                 cell.font = Font(bold=True)
@@ -922,7 +922,7 @@ class LinksPage(QWidget):
         cat = self.model.item(row, COL_CAT).text().strip()
         url = self.model.item(row, COL_URL).text().strip()
         name = self.model.item(row, COL_TITLE).text().strip()  # 标题 → sites.original_title
-        source_name = self.model.item(row, COL_PUBLISHER).text().strip()  # 网站域名 → sites.name
+        source_name = self.model.item(row, COL_PUBLISHER).text().strip()  # 发布者/域名 → sites.name
         attr = self.model.item(row, COL_ATTR).text().strip()
 
         code = self.model.item(row, COL_CODE).text().strip()
@@ -1028,7 +1028,7 @@ class LinksPage(QWidget):
         conn = get_conn()
         cursor = conn.cursor()
 
-        # ★ 第 4 位 sites.name（网站域名），第 12 位 sites.original_title（标题）
+        # ★ 第 4 位 sites.name（发布者/域名），第 12 位 sites.original_title（标题）
         query_base = ("SELECT id, target_platform, site_url, name, attr, feature_code, "
                       "complaint_time, resource_status, book_id, book_name, crawl_status, "
                       "picker_status, original_title FROM sites")
@@ -1067,7 +1067,7 @@ class LinksPage(QWidget):
             item_cat = QStandardItem(cat or "")
             url_item = QStandardItem(url or "")
 
-            # ★ 网站域名（来源名，可编辑）→ sites.name
+            # ★ 发布者/域名（来源名，可编辑）→ sites.name
             item_publisher = QStandardItem(source_name or "")
             item_publisher.setEditable(True)
 
@@ -1137,7 +1137,7 @@ class LinksPage(QWidget):
                 url_item.setForeground(QColor("red"))
                 url_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
 
-            # ★ 网站域名（来源名，可编辑）← draft.source_site
+            # ★ 发布者/域名（来源名，可编辑）← draft.source_site
             item_publisher = QStandardItem(record.get("source_site") or "")
             item_publisher.setEditable(True)
 

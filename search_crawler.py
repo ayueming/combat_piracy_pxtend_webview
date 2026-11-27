@@ -34,6 +34,81 @@ class SearchCrawler:
         except Exception:
             pass
 
+    def _expand_weibo_text(self, page, expand_selector):
+        """批量点击微博正文的「展开」，等 Vue 更新完再返回"""
+        if not expand_selector:
+            return
+        try:
+            clicked = page.evaluate("""
+            (sel) => {
+                const btns = Array.from(document.querySelectorAll(sel));
+                let n = 0;
+                btns.forEach(b => {
+                    if (b.offsetParent !== null && (b.innerText || '').trim() === '展开') {
+                        b.click();
+                        n++;
+                    }
+                });
+                return n;
+            }
+            """, expand_selector)
+
+            if clicked:
+                self._log(f"🔽 已点击 {clicked} 个「展开」，等待正文更新...")
+                try:
+                    page.wait_for_function("""
+                    (sel) => {
+                        const left = Array.from(document.querySelectorAll(sel))
+                            .filter(b => b.offsetParent !== null
+                                      && (b.innerText || '').trim() === '展开');
+                        return left.length === 0;
+                    }
+                    """, expand_selector, timeout=3000)
+                except Exception:
+                    page.wait_for_timeout(1000)
+        except Exception as e:
+            self._log(f"⚠️ 展开失败: {e}")
+
+    def _scan_current_page(self, page, scanner_type, strategy):
+        """统一入口：确保 scanner 已加载 → 点开「展开」→ 扫描"""
+        self._ensure_scanner_loaded(page)
+        self._expand_weibo_text(page, strategy.get("expandSelector"))
+        if scanner_type == "tieba":
+            links = page.evaluate(
+                "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
+        else:
+            links = page.evaluate(
+                "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
+
+        # 兜底清理 body 末尾可能残留的「展开/收起」
+        import re
+        if links:
+            for link in links:
+                b = link.get("body") or ""
+                link["body"] = re.sub(r"\s*(展开|收起)\s*$", "", b).strip()
+        return links or []
+
+    def _merge_links(self, final_links_map, current_links):
+        """按 URL 去重合并；如果新 body 更长，用新的覆盖旧的"""
+        if not current_links:
+            return
+        for link in current_links:
+            url = link.get("url")
+            if not url:
+                continue
+            old = final_links_map.get(url)
+            if old is None:
+                final_links_map[url] = link
+            else:
+                old_body = old.get("body") or ""
+                new_body = link.get("body") or ""
+                if len(new_body) > len(old_body):
+                    old["body"] = new_body
+                    if link.get("title"):
+                        old["title"] = link["title"]
+                    if link.get("source_site"):
+                        old["source_site"] = link["source_site"]
+
     def _log(self, text, current=0, maximum=0):
         """统一的进度日志输出：始终打印到控制台；是否发信号给 UI 由开关控制"""
         print(text)  # ★ 控制台日志始终保留，便于排查
@@ -106,18 +181,8 @@ class SearchCrawler:
 
                         # 抓首屏
                         try:
-                            self._ensure_scanner_loaded(page)
-                            if scanner_type == "tieba":
-                                current_links = page.evaluate(
-                                    "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
-                            else:
-                                current_links = page.evaluate(
-                                    "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
-                            if current_links:
-                                for link in current_links:
-                                    url = link.get("url")
-                                    if url and url not in final_links_map:
-                                        final_links_map[url] = link
+                            current_links = self._scan_current_page(page, scanner_type, strategy)
+                            self._merge_links(final_links_map, current_links)
                         except Exception:
                             pass
                         last_total = len(final_links_map)
@@ -140,18 +205,8 @@ class SearchCrawler:
                             page.wait_for_timeout(random.randint(1500, 2500))
 
                             try:
-                                self._ensure_scanner_loaded(page)
-                                if scanner_type == "tieba":
-                                    current_links = page.evaluate("(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
-                                else:
-                                    current_links = page.evaluate(
-                                        "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
-
-                                if current_links:
-                                    for link in current_links:
-                                        url = link.get("url")
-                                        if url and url not in final_links_map:
-                                            final_links_map[url] = link
+                                current_links = self._scan_current_page(page, scanner_type, strategy)
+                                self._merge_links(final_links_map, current_links)
                             except Exception as e:
                                 self._log(f"⚠️ scroll 第 {step + 1} 步扫描失败: {e}")
 
@@ -205,18 +260,8 @@ class SearchCrawler:
 
                             # ===== 抓取（原逻辑不变） =====
                             try:
-                                self._ensure_scanner_loaded(page)
-                                if scanner_type == "tieba":
-                                    current_links = page.evaluate(
-                                        "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)", strategy)
-                                else:
-                                    current_links = page.evaluate(
-                                        "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)", strategy)
-                                if current_links:
-                                    for link in current_links:
-                                        url = link.get("url")
-                                        if url and url not in final_links_map:
-                                            final_links_map[url] = link
+                                current_links = self._scan_current_page(page, scanner_type, strategy)
+                                self._merge_links(final_links_map, current_links)
                             except Exception as e:
                                 self._log(f"⚠️ 第 {page_num} 页扫描失败，保留已抓 {len(final_links_map)} 条后跳出: {e}",
                                           page_num, max_pages)
@@ -376,7 +421,7 @@ class SearchCrawler:
                         for page_num in range(1, max_pages + 1):
                             # ---- 1. 等首屏 / 上一页结果稳定 ----
                             if page_num == 1:
-                                wait_top = random.uniform(1.0, 2.5)
+                                wait_top = random.uniform(1.0, 2.0)
                                 self._log(f"👀 第 {page_num} 页加载完毕，停留 {wait_top:.1f} 秒...",
                                           page_num - 1, max_pages)
                                 page.wait_for_timeout(int(wait_top * 1000))
@@ -391,22 +436,11 @@ class SearchCrawler:
 
                             # ---- 3. 扫描当前全量 DOM（scanGeneric 自带全量 + 去重）----
                             try:
-                                self._ensure_scanner_loaded(page)
-                                if scanner_type == "tieba":
-                                    current_links = page.evaluate(
-                                        "(strategy) => window.__apt_scanner_strategies.scanTieba(strategy)",
-                                        strategy)
-                                else:
-                                    current_links = page.evaluate(
-                                        "(strategy) => window.__apt_scanner_strategies.scanGeneric(strategy)",
-                                        strategy)
+                                current_links = self._scan_current_page(page, scanner_type, strategy)
                                 if current_links:
-                                    new_cnt = 0
-                                    for link in current_links:
-                                        url = link.get("url")
-                                        if url and url not in final_links_map:
-                                            final_links_map[url] = link
-                                            new_cnt += 1
+                                    before = len(final_links_map)
+                                    self._merge_links(final_links_map, current_links)
+                                    new_cnt = len(final_links_map) - before
                                     self._log(
                                         f"✅ 第 {page_num} 页扫描：本页新增 {new_cnt} 条，累计 {len(final_links_map)} 条",
                                         page_num, max_pages)

@@ -344,8 +344,15 @@ class ComplaintsPage(QWidget):
             self.on_batch_selected(self.batch_list.currentRow())
 
     def _on_task_finished(self):
+        # ★ 忽略不属于当前 dispatcher 的 task_finished（防止旧任务迟到信号清掉新任务）
+        sender = self.sender()
+        if sender is not None and sender is not self.dispatcher:
+            print("忽略非当前任务的 task_finished 信号。")
+            return
+
         self.auto_running = False
         self.dispatcher = None
+        self._worker_thread = None
 
         if getattr(self, "progress_dialog", None):
             try:
@@ -378,10 +385,16 @@ class ComplaintsPage(QWidget):
         QTimer.singleShot(2000, self._force_unlock_ui)
 
     def _force_unlock_ui(self):
-        """强行解锁 UI（防止后台线程因死锁无法发出 task_finished）"""
-        if self.auto_running:
-            print("⚠️ 检测到后台线程可能已死锁，强行解锁界面按钮。")
-            self._on_task_finished()
+        if not self.auto_running:
+            return
+        # ★ 后台还在正常收尾（在等检查点），不要强行解锁，让它自己 emit task_finished
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            print("⏳ 后台任务正在收尾（等待停止信号生效），暂不解锁 UI。")
+            # 兜底：再等 20 秒，防止真的死锁永远不解锁
+            QTimer.singleShot(20000, self._force_unlock_ui)
+            return
+        print("⚠️ 后台线程已不存在，强行解锁界面按钮。")
+        self._on_task_finished()
 
     def _on_login_confirmed(self):
         """用户点击了 已登录继续 按钮"""
@@ -654,6 +667,7 @@ class ComplaintsPage(QWidget):
         QApplication.processEvents()
 
         t = threading.Thread(target=self.dispatcher.run, daemon=True)
+        self._worker_thread = t
         t.start()
 
     def mark_specific_batch_done(self, batch):

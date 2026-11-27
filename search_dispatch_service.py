@@ -99,15 +99,11 @@ def dispatch_search_task(platform, keyword, max_pages, sub_kws=None,
 
     def _run_playwright():
         try:
-            if not ensure_ready(business_name="搜索抓取", timeout=8.0):
-                raise RuntimeError("浏览器启动或 CDP 接管失败")
-
             from browser_manager import BrowserManager
             from search_crawler import SearchCrawler
 
-            bm = BrowserManager.instance()
+            bm = BrowserManager.instance()  # 启动/接管/重连全在 BM 内闭环
             crawler = SearchCrawler(bm)
-
             links = bm.run_in_browser_thread(crawler.run_task, task)
 
             if links:

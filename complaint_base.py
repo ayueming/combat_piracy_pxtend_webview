@@ -25,7 +25,8 @@ class AutoComplaintSignals(QObject):
 class BaseComplaintRunner:
     def __init__(self, complaints_data, signals=None, is_all=False, stop_event=None,
                  login_event=None, dialog_signal=None,
-                 expected_uid=None, expected_nickname=None):
+                 expected_uid=None, expected_nickname=None,
+                 keep_page_on_failure=True):
         self.complaints_data = complaints_data
         self.signals = signals or AutoComplaintSignals()
         self.is_all = is_all
@@ -52,6 +53,10 @@ class BaseComplaintRunner:
         # 3. 子类必须覆盖的标识
         self.platform_code = ""
         self.platform_logo = ""
+
+        self._owned_pages = []  # ★ 本任务持有的所有 page
+        # ★ 失败是否保留现场页（默认 False：无论成败都回收，保持与原有 finally 逻辑一致）
+        self.keep_page_on_failure = keep_page_on_failure
 
     def log(self, msg):
         """统一日志输出，自动带上平台前缀"""
@@ -83,8 +88,27 @@ class BaseComplaintRunner:
             self.page = bm.new_page()
             print(f"[Base.init_browser] 拿到 page id={id(self.page)} "
                   f"thread={threading.get_ident()}")  # 新增
+            self._owned_pages.append(self.page)
         except Exception as e:
             raise RuntimeError(f"浏览器启动失败: {e}")
+
+    def new_owned_page(self, url=None, activate=False):
+        """本任务内开一个临时页（归属本任务，run() 结束统一回收）"""
+        bm = BrowserManager.instance()
+        p = bm.new_page(url=url, force_new=True, activate=activate)
+        self._owned_pages.append(p)
+        return p
+
+    def close_owned_page(self, page):
+        """即时关闭单个临时页，并从清单中摘除（避免 finally 重复关闭）"""
+        try:
+            BrowserManager.instance().close_page(page)
+        except Exception:
+            pass
+        try:
+            self._owned_pages.remove(page)
+        except ValueError:
+            pass
 
     def take_screenshot(self):
         """保存报错截图"""
@@ -190,6 +214,7 @@ class BaseComplaintRunner:
                 self.log("⚠️ 检测到未登录/掉线，脚本已挂起...")
                 if self.dialog_signal:
                     self.dialog_signal.show_login_required()
+                    self.bring_browser_to_front()  # ★ 立刻把浏览器拉到前台
 
             if self.login_event:
                 self.login_event.wait(timeout=1)  # ★ 改为1秒步长，快速轮询
@@ -237,6 +262,7 @@ class BaseComplaintRunner:
                     self.dialog_signal.show_user_handle_required(
                         "请完善网页上的投诉人资料（含证件扫描件），完成后点击下方【已确认填写】按钮。"
                     )
+                    self.bring_browser_to_front()
 
             # 等待用户点击小窗按钮触发 login_event
             if self.login_event:
@@ -249,6 +275,14 @@ class BaseComplaintRunner:
             if waited >= timeout_sec:
                 self.log(f"❌ 等待填写超时（{timeout_sec}秒）")
                 return False
+
+    def bring_browser_to_front(self):
+        """把浏览器窗口抢到前台，供登录、扫码、人工接管等场景使用"""
+        try:
+            bm = BrowserManager.instance()
+            bm.bring_to_front(self.page)
+        except Exception as e:
+            print(f"[{self.platform_logo}] 抢焦点失败（忽略）: {e}")
 
     # ==================== 生命周期统一入口 ====================
     def run(self):
@@ -269,6 +303,7 @@ class BaseComplaintRunner:
             self.log(f"❌ 运行遇到严重错误：{e}")
             self.log(traceback.format_exc())
             self.take_screenshot()
+            self.bring_browser_to_front()  #让用户马上看到出错现场
             return False
 
         finally:
@@ -288,16 +323,36 @@ class BaseComplaintRunner:
                 except Exception:
                     pass
 
-            # 2. 成功复用Tab，失败保留现场
-            if self.task_success:
-                try:
-                    if self.page and not self.page.is_closed():
-                        self.page.goto("about:blank", timeout=5000)
-                        print(f"[{self.platform_logo}] （任务成功，页面已重置为空白页，供下一批复用）")
-                except Exception:
-                    pass
-            else:
-                print(f"[{self.platform_logo}] （任务失败/挂起，保留当前现场页面，供用户查看）")
+            # 3.页面生命周期：一次性回收
+            user_aborted = bool(self.stop_event and self.stop_event.is_set())
+            keep_now = self.keep_page_on_failure or user_aborted  # ★ 中断也保留
+
+            try:
+                bm = BrowserManager.instance()
+                if self.task_success and not user_aborted:
+                    # 正常成功：全部关闭
+                    alive = [p for p in self._owned_pages if p and not p.is_closed()]
+                    if alive:
+                        bm.close_pages(alive)
+                    self._owned_pages.clear()
+                    self.page = None
+                elif keep_now:
+                    # 失败 / 用户中断：只保留主页面，临时页清理
+                    others = [p for p in self._owned_pages
+                              if p and p is not self.page and not p.is_closed()]
+                    if others:
+                        bm.close_pages(others)
+                    self._owned_pages = [self.page] if self.page and not self.page.is_closed() else []
+                    print(f"[{self.platform_logo}] 🛠 现场已保留（user_aborted={user_aborted}）")
+                else:
+                    # 失败但不要求保留：全部关闭（原行为）
+                    alive = [p for p in self._owned_pages if p and not p.is_closed()]
+                    if alive:
+                        bm.close_pages(alive)
+                    self._owned_pages.clear()
+                    self.page = None
+            except Exception as e:
+                print(f"[{self.platform_logo}] 页面回收失败: {e}")
 
     def execute_flow(self):
         """★ 抽象方法：子类必须实现具体的业务逻辑"""
