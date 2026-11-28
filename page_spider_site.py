@@ -1137,8 +1137,8 @@ class SpiderPage(QWidget):
                 continue
 
             try:
-                # ★ category 与 target_platform 双写，确保在盗版链接页正常显示分类。
-                #   page_links.refresh_table() 的资源分类列读的就是 target_platform。
+                # ★ 对外分类以 category 为准；target_platform 同步写同一个值，
+                #   保留给需要审计/兼容的消费者。盗版链接页已统一读 sites.category。
                 cursor.execute('''INSERT INTO sites
                                   (category, target_platform, site_url, feature_code, book_id, book_name, name, attr,
                                    crawl_status, is_mobile)

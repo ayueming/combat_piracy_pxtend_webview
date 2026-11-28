@@ -150,8 +150,9 @@ def import_sites_from_file(file_path):
             # 强制使用系统里的标准名字入库，防止用户多敲空格
             final_book_name = sys_name
 
-            # ★ 关键修复：同步写入 target_platform，与页面 save_row_to_db 保持一致。
-            #   page_links.refresh_table() 的"资源分类"列读的就是 target_platform。
+            # ★ 对外分类以 category 为准；导入数据没有独立的系统判断，
+            #   target_platform 同步写同一个值，避免历史消费者读到空值。
+            #   盗版链接页已统一读 sites.category。
             cursor.execute('''INSERT INTO sites
                               (category, target_platform, site_url, name, attr, feature_code, complaint_time,
                                resource_status, book_id, book_name)

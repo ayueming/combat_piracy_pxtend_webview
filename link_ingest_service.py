@@ -134,11 +134,15 @@ def _should_block_by_keyword(title, body, keyword):
 
 
 def _classify_platform(url, fallback_platform):
-    """扫描 PLATFORM_DOMAINS 识别目标平台。返回 (平台名, 是否命中)。"""
+    """扫描 PLATFORM_DOMAINS 识别目标平台。返回 (平台名, 是否命中)。
+
+    未命中时直接返回 fallback_platform（通常是 source_platform），
+    不再额外兜底成“其他”；来源为空时才返回空字符串，由 UI 决定怎么显示。
+    """
     for plat_name, domains in PLATFORM_DOMAINS.items():
         if any(d in url for d in domains):
             return plat_name, 1
-    return (fallback_platform or "其他"), 0
+    return (fallback_platform or ""), 0
 
 
 def _calc_relevance(title, body, source_site, signals):
@@ -159,6 +163,10 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     """
     极简入库：只清洗 URL，原样全量存入 draft_links，状态一律 pending。
     不查重、不查白名单、不匹配关键词。
+
+    ★ PENDING 阶段不写最终分类：target_platform 尚未判断，category 也留空。
+      只有 organize_pending_links 判断完成后，才会把 target 赋给 category。
+      category 参数仅为兼容旧调用方保留，这里不再使用。
     """
     ensure_schema()
 
@@ -185,7 +193,8 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
     elif isinstance(book_id, str) and book_id.isdigit():
         book_id = int(book_id)
 
-    if not category: category = source_platform or "其他"
+    # PENDING 阶段还没有 target_platform，因此 category 不能提前填来源。
+    category = ""
 
     feature_code = extract_pure_feature(url)
     page_title = (title or "").strip()[:200]
@@ -221,12 +230,13 @@ def save_picked_link(url, title, ctx, body="", source_site="", parent_url="", pa
         conn.close()
 
     record = {
-        "db_id": db_id, "book_name": book_name, "category": category, "site_url": url,
+        "db_id": db_id, "book_name": book_name, "category": "", "site_url": url,
         "name": page_title, "body_text": body_text, "source_site": source_site_text,
         "attr": pick_origin, "feature_code": feature_code, "crawl_status": CRAWL_STATUS_PENDING,
         "complaint_time": "", "resource_status": "", "source_platform": source_platform,
+        "target_platform": "", "domain_matched": 0,
         "source_keyword": source_keyword, "source_url": source_url, "fetch_time": fetch_time,
-        "batch_id": batch_id, "domain_matched": 0, "is_mobile": is_mobile
+        "batch_id": batch_id, "is_mobile": is_mobile
     }
     return record, False, True
 
@@ -489,7 +499,8 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids, normalize=True):
                     "SELECT site_url, name, body_text, source_site, feature_code, "
                     "  source_platform, source_keyword, source_url, attr, "
                     "  book_id, book_name, target_platform, fetch_time, batch_id, "
-                    "  parent_url, parent_title, is_mobile, first_url, second_url "  # ★ 增加
+                    "  parent_url, parent_title, is_mobile, first_url, second_url, "
+                    "  domain_matched "
                     "FROM draft_links WHERE id = ?", (db_id,)
                 ).fetchone()
 
@@ -498,7 +509,8 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids, normalize=True):
                 (url, name, body, source_site, code,
                  plat, kw, src_url, attr,
                  book_id, book_name, target_platform, fetch_time, batch_id,
-                 parent_url, parent_title, is_mobile, first_url, second_url) = row  # ★ 增加解包
+                 parent_url, parent_title, is_mobile, first_url, second_url,
+                 domain_matched) = row  # ★ 增加解包
 
                 # ★ B：book_id 缺失时按书名反查 books 表兜底
                 #    覆盖历史脏数据 / 手动拾取 / 表格导入等 book_id 为空的路径
@@ -518,16 +530,18 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids, normalize=True):
                         code = extract_pure_feature(url) or code
 
                 try:
+                    # category 是卡片最终确认值（对外唯一分类）；
+                    # target_platform 保留系统判断值，仅作审计，不再决定页面展示。
                     cursor.execute(
                         "INSERT OR IGNORE INTO sites (category, target_platform, site_url, name, original_title, body_text, "
                         "  attr, feature_code, book_id, book_name, "
                         "  source_platform, source_keyword, source_url, fetch_time, "
                         "  batch_id, domain_matched, parent_url, parent_title, is_mobile, first_url, second_url) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # ★ 改回 21 个问号
-                        (category, target_platform or category, url,
+                        (category, target_platform or "", url,
                          source_site or "未知来源", name, body, attr, code, book_id, book_name,
                          plat, kw, src_url, fetch_time, batch_id,
-                         1 if target_platform else 0, parent_url, parent_title, is_mobile,
+                         int(domain_matched or 0), parent_url, parent_title, is_mobile,
                          first_url, second_url)
                     )
                     if cursor.rowcount > 0:

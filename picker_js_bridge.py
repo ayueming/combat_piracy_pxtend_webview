@@ -3,6 +3,7 @@
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app_data.complaint_platform_consts import PLATFORM_DOMAINS
 
@@ -32,6 +33,19 @@ class PickerJsBridge(QObject):
             base["source_platform"] = base["category"]
         return base
 
+    def _confirm_network_resolve(self, url):
+        """短链/中转链入库前确认。True=继续解析，False=放弃整条记录。"""
+        reply = QMessageBox.question(
+            QApplication.activeWindow(),
+            "该链接需要解析",
+            "该链接是短链或中转页，需要打开浏览器解析后才能入库。\n\n"
+            "解析过程可能打开或切换浏览器页面，是否继续？\n\n"
+            f"{url}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
     def _save_and_emit(self, url, title, body, book_name, category, signal_name, auto_route=False):
         try:
             # ★ 第一步：优先尝试离线解析（如微博 sinaurl 中转）
@@ -47,6 +61,14 @@ class PickerJsBridge(QObject):
                             break
 
                     print(f"✨ [Picker] 离线解析成功，自动纠正分类为: {category}")
+
+            # ★ 离线仍解不开：必须用户确认后再启动浏览器。
+            #   确认放在 save_picked_link 之前：放弃时零写入，
+            #   也不会把父页面标成“已拾取”导致它从可预览列表消失。
+            needs_network_resolve = self.resolver.needs_resolve(url)
+            if needs_network_resolve and not self._confirm_network_resolve(url):
+                print("⏭️ [Picker] 用户放弃解析，取消入库")
+                return
 
             source_site = ""
             try:
@@ -70,15 +92,13 @@ class PickerJsBridge(QObject):
                 getattr(self, signal_name).emit(record)
                 ws_signals.new_data_inserted.emit(1)
 
-                # 此时因为入库的就是夸克链接，is_short_url 肯定为 False
-                if auto_route and not is_short_url(url):
+                # 非短链直接进流水线；短链/中转链已获用户确认，也只解析这一条。
+                if needs_network_resolve or (auto_route and not is_short_url(url)):
                     try:
                         trigger_organize_single(int(record["db_id"]))
-                        print(f"🚀 [Picker] 非短链自动进入流水线: {url[:60]}")
+                        print(f"🚀 [Picker] 已确认解析: {url[:60]}")
                     except (ValueError, KeyError, TypeError) as e:
                         print(f"⚠️ [Picker] 自动流水线触发失败: {e}")
-                elif auto_route and is_short_url(url):
-                    print(f"✅ [Picker] 已拾取（短链，等待手动解析）: {(title or '')[:40]}")
                 else:
                     print(f"📥 [Picker] 已拾取（仅保存，等待手动触发解析）: {(title or '')[:40]}")
             else:

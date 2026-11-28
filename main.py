@@ -39,7 +39,7 @@ from spider_forum_webview import SpiderForumWebView
 from picker_web_view import PickerWebView
 
 
-VERSION = "V3.8.2"
+VERSION = "V3.8.4"
 
 
 # ==========================================

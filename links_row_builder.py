@@ -9,7 +9,7 @@
 record 约定字段（缺省按空处理）：
     db_id            数据库主键（空 = 尚未入库的新行）
     book_name        关联作品
-    category         资源分类（写库时同时写 category / target_platform）
+    category         资源分类（对外唯一值，页面读写的都是 sites.category）
     site_url         资源链接
     source_site      发布方 → sites.name
     attr             属性

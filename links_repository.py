@@ -15,8 +15,10 @@ from db_config import get_conn
 # 链接行查询：书籍名用 JOIN 解析，避免页面里再遍历 book_list 做 O(n*m) 匹配。
 # 规则与页面原逻辑一致：有 book_id 时只认 books.name（查不到就是空），
 # 没有 book_id 时才退回 sites.book_name。
+# ★ 资源分类统一读 sites.category：它是用户最终确认值；
+#   sites.target_platform 只保留系统判断结果，供审计，不再作为页面展示/筛选依据。
 _LINK_SELECT = """
-    SELECT s.id, s.target_platform, s.site_url, s.name, s.attr, s.feature_code,
+    SELECT s.id, s.category, s.site_url, s.name, s.attr, s.feature_code,
            s.complaint_time, s.resource_status, s.book_id, s.book_name,
            s.crawl_status, s.picker_status, s.original_title, s.handle_status,
            CASE WHEN s.book_id IS NOT NULL THEN COALESCE(b.name, '')
@@ -35,7 +37,7 @@ _INSERT_SQL = """
 
 _UPDATE_SQL = """
     UPDATE sites
-       SET category = ?, target_platform = ?, site_url = ?, name = ?, attr = ?,
+       SET category = ?, site_url = ?, name = ?, attr = ?,
            feature_code = ?, complaint_time = ?, resource_status = ?, handle_status = ?,
            book_id = ?, book_name = ?, crawl_status = ?, picker_status = ?
      WHERE id = ?
@@ -71,13 +73,13 @@ def fetch_books():
 
 
 def fetch_links(target_cats=None):
-    """target_cats=None 表示全部；否则按 target_platform 过滤（空分类始终包含）。"""
+    """target_cats=None 表示全部；否则按 sites.category 过滤（空分类始终包含）。"""
     conn = get_conn()
     try:
         if target_cats:
             placeholders = ",".join("?" * len(target_cats))
-            sql = (f"{_LINK_SELECT} WHERE (s.target_platform IN ({placeholders}) "
-                   f"OR s.target_platform IS NULL OR s.target_platform = '') "
+            sql = (f"{_LINK_SELECT} WHERE (s.category IN ({placeholders}) "
+                   f"OR s.category IS NULL OR s.category = '') "
                    f"ORDER BY s.id ASC")
             rows = conn.execute(sql, list(target_cats)).fetchall()
         else:
@@ -128,10 +130,24 @@ def has_duplicate_feature(feature_code, exclude_id=None):
 def save_link(record, db_id=None):
     """插入（db_id 为空）或更新一条链接。
 
+    - category 是对外最终分类，页面展示/筛选/写库都以它为准；
+    - target_platform 只在插入时保留调用方传入的系统判断值（人工新增没有，
+      留空）；更新分类时不覆盖它，避免把系统判断值改掉。
+
     返回写入后的主键字符串；唯一约束冲突时返回 None（不抛给界面）。
     """
-    params = (
-        record.get("category") or "", record.get("category") or "",
+    category = record.get("category") or ""
+    insert_params = (
+        category, record.get("target_platform") or "",
+        record.get("site_url") or "", record.get("source_site") or "",
+        record.get("attr") or "", record.get("feature_code") or "",
+        record.get("complaint_time") or "", record.get("resource_status"),
+        record.get("handle_status"), record.get("book_id"),
+        record.get("book_name") or "", record.get("crawl_status") or "",
+        record.get("picker_status") or "",
+    )
+    update_params = (
+        category,
         record.get("site_url") or "", record.get("source_site") or "",
         record.get("attr") or "", record.get("feature_code") or "",
         record.get("complaint_time") or "", record.get("resource_status"),
@@ -143,10 +159,10 @@ def save_link(record, db_id=None):
     try:
         cursor = conn.cursor()
         if db_id:
-            cursor.execute(_UPDATE_SQL, params + (db_id,))
+            cursor.execute(_UPDATE_SQL, update_params + (db_id,))
             conn.commit()
             return str(db_id)
-        cursor.execute(_INSERT_SQL, params)
+        cursor.execute(_INSERT_SQL, insert_params)
         conn.commit()
         return str(cursor.lastrowid)
     except sqlite3.IntegrityError:

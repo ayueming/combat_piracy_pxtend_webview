@@ -149,7 +149,7 @@ class DataCard(BaseCard):
             "font-size: 12px; background: #FFF; font-weight: bold; color: #059669; }")
         self.combo_cat.setFixedSize(75, 24)
 
-        cur_cat = self.original_category or "其他"
+        cur_cat = self.original_category or self.target_platform or "其他"
         candidates = [cur_cat] + list(ALL_SUB_PLATFORMS)
         seen = set()
         for opt in candidates:
@@ -200,7 +200,13 @@ class DataCard(BaseCard):
 
         # readonly：底部只显示分类文本
         row = QHBoxLayout()
-        lbl_cat = QLabel(f"分类: {self.original_category or '无'}")
+        if self.original_category:
+            cat_text = self.original_category
+        elif self.status in ("待解析", "解析失败"):
+            cat_text = "待解析"
+        else:
+            cat_text = "无"
+        lbl_cat = QLabel(f"分类: {cat_text}")
         lbl_cat.setStyleSheet("color: #4B5563; font-weight: bold; border: none;")
         row.addWidget(lbl_cat)
         return row
