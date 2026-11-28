@@ -9,7 +9,7 @@ from qfluentwidgets import SimpleCardWidget  # ★ 引入 Fluent 卡片
 from db_schema import ensure_schema
 from ws_server import set_app_mode
 from search_result_panel import SearchResultPanel, ToastLabel
-from mobile_url_utils import resolve_is_mobile
+from url_mobile_utils import resolve_is_mobile
 
 # ★ 拆分出的两个子面板
 from search_input_panel import SearchInputPanel

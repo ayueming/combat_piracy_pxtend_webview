@@ -1,4 +1,4 @@
-# mobile_url_utils.py
+# url_mobile_utils.py
 from urllib.parse import urlparse
 
 from app_data.mobile_consts import MOBILE_HOST_PREFIXES

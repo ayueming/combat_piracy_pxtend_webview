@@ -33,7 +33,7 @@ from app_data import ALL_SUB_PLATFORMS
 from spider_crawler import crawl_sites
 from feature_extractor import extract_pure_feature
 from db_config import get_conn
-from mobile_url_utils import resolve_is_mobile
+from url_mobile_utils import resolve_is_mobile
 
 from picker_web_view import PickerWebView
 from app_data.crawl_status_consts import CRAWL_STATUS_ORGANIZED

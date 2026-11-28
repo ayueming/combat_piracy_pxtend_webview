@@ -10,6 +10,9 @@ from PySide6.QtCore import Qt, Signal, QSize, QVariantAnimation, QEasingCurve
 from datetime import datetime
 from db_config import get_conn
 
+# ★ 投诉成功后要同步重算「处理状况」，避免库里停在「待投诉」
+from link_handle_status import compute_handle_status
+
 # === ★ 统一调度器 ===
 from complaint_dispatcher import ComplaintDispatcher, PLATFORM_ROUTER
 
@@ -676,6 +679,16 @@ class ComplaintsPage(QWidget):
         try:
             for item in batch:
                 conn.execute("UPDATE sites SET complaint_time=? WHERE id=?", (today, item["id"]))
+
+                # ★ 投诉时间变了 → 处理状况必须立刻重算，否则库里还留着「待投诉」
+                #   （状态不变时：已失效/网站类→已完成，其余→等待结果）
+                row = conn.execute(
+                    "SELECT resource_status FROM sites WHERE id=?", (item["id"],)
+                ).fetchone()
+                if row:
+                    handle = compute_handle_status(row[0], today)
+                    conn.execute("UPDATE sites SET handle_status=? WHERE id=?",
+                                 (handle, item["id"]))
             conn.commit()
         finally:
             conn.close()

@@ -94,6 +94,30 @@ CELL_INVALID_BG = ERROR_BG             # 格式非法：红底 + 红字
 CELL_INVALID_FG = DANGER_RED
 
 
+# ================= 资源状态文字色（按语义角色，不认中文） =================
+# 业务文字与角色定义在 app_data/resource_status_consts.py，
+# 这里只负责“角色 → 颜色/加粗”，改色只改这里。
+STATUS_TEXT_COLORS = {
+    "invalid": TOGGLE_GREEN,   # 已失效（绿 + 加粗）
+    "website": "#2563EB",      # 网站类（蓝 + 加粗）
+    "valid": "#FAC03D",        # 有效（黄）
+    "unknown": "#E5484D",      # 未知（红，判了但没命中特征）
+    "failed": "#DC2626",       # 失败（深红，被拦截 / 请求异常）
+    "pending": "#6B7280",      # 暂无判断（灰，无规则 / skip / spa）
+}
+STATUS_BOLD_ROLES = {"invalid", "website","valid", "unknown", "failed", "pending"}
+
+# 处理状况（handle_status）的文字色 / 加粗，同样按语义角色，
+# 角色定义在 handle_status.HANDLE_ROLE。
+HANDLE_STATUS_TEXT_COLORS = {
+    "pending": "#6B7280",    # 待投诉
+    "done": "#10B981",       # 已完成
+    "waiting": "#2563EB",    # 等待结果
+    "abnormal": "#DC2626",   # 异常
+}
+HANDLE_STATUS_BOLD_ROLES = ("pending", "done", "waiting", "abnormal")   # 默认不加粗；要加粗把角色名加进来
+
+
 # ================= 按钮公共片段 =================
 _BTN_COMMON = "border-radius: 4px; padding: 6px 12px; font-size: 13px;"
 _BTN_COMMON_SMALL = "border-radius: 4px; padding: 4px 12px; font-size: 12px;"
@@ -355,6 +379,34 @@ TABLE_HEADER_BASE = f"""
 # 语义 = 公共骨架 + 默认灰底，等价于普通 QHeaderView 的写法
 HEADER_BASE = TABLE_HEADER_BASE + f"""
     QHeaderView::section:horizontal {{ background-color: {HEADER_BG_COLOR}; }}
+"""
+
+
+# ================= 右键菜单 =================
+# ★ 必须显式设置：页面用 page.setStyleSheet("background-color: white;") 铺白底，
+#   该样式会级联到子控件 QMenu，把菜单项底也刷白；而主题（qfluentwidgets）在
+#   高亮态用白字，结果「白底白字」——鼠标悬停时文字看不见。
+#   这里把常态/高亮态的前景与背景都写死，不再依赖继承来的样式。
+MENU_BASE = f"""
+    QMenu {{
+        background-color: {BG_WHITE};
+        border: 1px solid {BORDER_LIGHT};
+        padding: 4px 0;
+    }}
+    QMenu::item {{
+        color: {TEXT_DARK};
+        background: transparent;
+        padding: 8px 24px 8px 16px;
+    }}
+    QMenu::item:selected {{
+        color: {TEXT_DARK};
+        background-color: {ROW_SELECTED_BG};
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {BORDER_SOFT};
+        margin: 4px 8px;
+    }}
 """
 
 

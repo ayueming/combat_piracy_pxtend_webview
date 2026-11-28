@@ -21,6 +21,7 @@ from datetime import datetime
 from db_config import get_conn
 from db_schema import ensure_schema
 from feature_extractor import extract_pure_feature
+from url_canonical import canonical_url
 from app_data.crawl_status_consts import (
     CRAWL_STATUS_PENDING, CRAWL_STATUS_ORGANIZED, CRAWL_STATUS_DONE,
     CRAWL_STATUS_PARSE_FAILED, CRAWL_STATUS_UNMATCHED,
@@ -466,7 +467,14 @@ def write_organized_links():
     return 0
 
 
-def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
+def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids, normalize=True):
+    """把草稿归档进 sites / ignored_links（终态写库）。
+
+    normalize=True 时，keep_items 的 site_url 会在写库前做一次离线标准化
+    （百度知道等有固定格式的平台）。只改 site_url；first_url / second_url
+    保留原始链路，方便追溯。search_result_panel 的“入库”会先问用户，
+    用户拒绝时传 normalize=False。
+    """
     if not keep_items and not drop_ids and not blacklist_ids:
         return 0, 0, 0
 
@@ -500,6 +508,14 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
                     ).fetchone()
                     if b:
                         book_id = b[0]
+
+                # ★ 归档前离线标准化（百度知道等有固定格式的平台）。
+                #   只改 site_url；first_url / second_url 保留原始链路。
+                if normalize:
+                    fixed_url = canonical_url(url)
+                    if fixed_url and fixed_url != url:
+                        url = fixed_url
+                        code = extract_pure_feature(url) or code
 
                 try:
                     cursor.execute(
@@ -542,6 +558,19 @@ def archive_batch_by_ids(keep_items, drop_ids, blacklist_ids):
 
         conn.commit()
         return inserted_count, dropped_count, black_count
+    finally:
+        conn.close()
+
+
+def get_draft_site_url(db_id):
+    """取草稿的最终链接（优先 site_url，回退 first_url），供 UI 入库前提示用。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(NULLIF(site_url, ''), first_url) FROM draft_links WHERE id = ?",
+            (db_id,)
+        ).fetchone()
+        return (row[0] or "") if row else ""
     finally:
         conn.close()
 

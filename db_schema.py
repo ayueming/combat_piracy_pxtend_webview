@@ -95,6 +95,7 @@ SITES_COLUMNS_SQL = """(
     feature_code        TEXT,
     complaint_time      TEXT,
     resource_status     TEXT,
+    handle_status       TEXT,          -- ★ 处理状况（待投诉/已完成/等待结果/异常）
     book_id             INTEGER,
     book_name           TEXT,
     crawl_status        TEXT,

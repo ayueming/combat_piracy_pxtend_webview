@@ -21,7 +21,7 @@ from app_data.complaint_platform_consts import (
 )
 from app_data import ALL_SUB_PLATFORMS
 from db_config import get_conn
-from mobile_url_utils import resolve_is_mobile
+from url_mobile_utils import resolve_is_mobile
 from ws_server import ws_signals
 
 from ui_styles import ROW_SELECTED_BG, TABLE_HEADER_BASE

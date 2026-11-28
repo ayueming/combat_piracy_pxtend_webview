@@ -5,10 +5,11 @@ from PySide6.QtWidgets import (QHeaderView, QStyleOptionButton, QApplication,
                                QStyle, QStyledItemDelegate, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QListWidget, QListWidgetItem, QLabel,
                                QLineEdit, QComboBox, QSizePolicy, QStylePainter,
-                               QStyleOptionComboBox, QTabWidget)
+                               QStyleOptionComboBox, QTabWidget,
+                               QCheckBox)
 from PySide6.QtCore import (Qt, QSortFilterProxyModel, QPoint, QRect, QEvent,
                             QItemSelection, QItemSelectionModel, QModelIndex, Signal,
-                            QTimer)
+                            QTimer, QSize)
 from PySide6.QtGui import QColor, QPainter, QPolygon, QPen, QPainterPath, QStandardItem
 
 # ★ 从 ui_styles 引入统一颜色，避免重复定义和色彩漂移
@@ -25,7 +26,12 @@ from ui_styles import (
     HEADER_BG_COLOR,
     BORDER_LIGHT,
     TAB_MODERN_GREEN,
+    STATUS_TEXT_COLORS,
+    STATUS_BOLD_ROLES,
 )
+
+# ★ 资源状态词汇 / 角色来自业务层，组件只负责按角色绘制
+from app_data.resource_status_consts import STATUS_OPTIONS, STATUS_ROLE
 
 # ================= 统一默认样式常量（可被子页面传参覆盖） =================
 CHECK_BG_COLOR = TOGGLE_GREEN  # 勾选框默认背景
@@ -91,6 +97,39 @@ def draw_checkbox(painter, rect, checked,
         painter.drawRoundedRect(box_rect, radius, radius)
 
     painter.restore()
+
+
+class StyledCheckBox(QCheckBox):
+    """纯手绘复选框：复用 draw_checkbox，保证与表格/筛选弹窗里的勾选框视觉一致。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QSize(CHECK_BOX_SIZE + 6 + fm.horizontalAdvance(self.text()),
+                     max(CHECK_BOX_SIZE, fm.height()) + 6)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 勾选框：交给统一工具，rect 宽度 = 框宽，draw_checkbox 会居中在其中
+        box_size = CHECK_BOX_SIZE
+        y = (self.height() - box_size) // 2
+        box_rect = QRect(0, y, box_size, box_size)
+        draw_checkbox(painter, box_rect, self.isChecked())
+
+        # 文字
+        if self.text():
+            painter.setPen(QColor(TEXT_DARK))
+            text_rect = QRect(box_size + 6, 0, self.width() - box_size - 6, self.height())
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.text())
 
 
 # ================= 统一三角箭头绘制工具 =================
@@ -273,18 +312,23 @@ class ComboCellDelegate(QStyledItemDelegate):
 
 
 class StatusComboDelegate(QStyledItemDelegate):
-    def createEditor(self, parent, option, index):
-        model = index.model()
-        comp_time = model.index(index.row(), 8).data()
-        if comp_time and str(comp_time).strip():
-            return None
+    """资源状态下拉委托。
 
+    注意：这里**不再**按投诉时间锁定。资源状态任何时候都允许人工修正，
+    “投诉后是否还在处理中”交给独立的、只读的「处理状况」列判断。
+    """
+
+    def __init__(self, parent=None, options=None):
+        super().__init__(parent)
+        self._options = list(STATUS_OPTIONS if options is None else options)
+
+    def createEditor(self, parent, option, index):
         combo = NoWheelComboBox(parent)
         combo.setStyleSheet("QComboBox { border: 1px solid #ccc; padding-left: 5px; background: #fff; }")
         combo.setFocusPolicy(Qt.StrongFocus)
 
-        combo.addItem("（空白）", "")
-        combo.addItem("已失效", "已失效")
+        for display, data in self._options:
+            combo.addItem(display, data)
 
         combo.view().setTextElideMode(Qt.ElideNone)
         combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 20)
@@ -292,7 +336,8 @@ class StatusComboDelegate(QStyledItemDelegate):
         return combo
 
     def setEditorData(self, editor, index):
-        if not editor: return
+        if not editor:
+            return
         text = index.data(Qt.DisplayRole)
         if not text or str(text).strip() == "":
             text = "（空白）"
@@ -301,9 +346,11 @@ class StatusComboDelegate(QStyledItemDelegate):
             editor.setCurrentIndex(idx)
 
     def setModelData(self, editor, model, index):
-        if not editor: return
+        if not editor:
+            return
         val = editor.currentData()
-        if val is None: val = ""
+        if val is None:
+            val = ""
         model.setData(index, val, Qt.EditRole)
 
     def paint(self, painter, option, index):
@@ -318,27 +365,23 @@ class StatusComboDelegate(QStyledItemDelegate):
         val = index.data(Qt.DisplayRole)
         text = str(val).strip() if val else ""
 
-        if text == "已失效":
-            painter.setPen(QColor(TOGGLE_GREEN))
-            font = option.font
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(option.rect.adjusted(5, 0, -20, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
-        elif text:
-            painter.setPen(QColor(TEXT_DARK))
-            painter.drawText(option.rect.adjusted(5, 0, -20, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
+        if text:
+            # ★ 组件只认“角色”，不认中文：文字→角色→颜色/加粗
+            role = STATUS_ROLE.get(text)
+            painter.setPen(QColor(STATUS_TEXT_COLORS.get(role, TEXT_DARK)))
+            if role in STATUS_BOLD_ROLES:
+                font = option.font
+                font.setBold(True)
+                painter.setFont(font)
+            painter.drawText(option.rect.adjusted(5, 0, -20, 0),
+                             Qt.AlignLeft | Qt.AlignVCenter, text)
 
-        comp_time = index.model().index(index.row(), 8).data()
-        if not (comp_time and str(comp_time).strip()):
-            draw_arrow(painter, option.rect)
+        draw_arrow(painter, option.rect)
 
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
-            comp_time = model.index(index.row(), 8).data()
-            if comp_time and str(comp_time).strip():
-                return False
             return True
         return super().editorEvent(event, model, option, index)
 
@@ -520,11 +563,14 @@ class CheckListDelegate(QStyledItemDelegate):
 
 
 class AdvancedFilterWidget(QWidget):
-    def __init__(self, column, unique_values, current_allowed, parent=None, proxy_model=None):
+    def __init__(self, column, unique_values, current_allowed, parent=None, proxy_model=None,
+                 value_order=None):
         super().__init__(parent)
         self.column = column
         self.unique_values = unique_values
         self.current_allowed = current_allowed
+        # 业务指定的取值顺序（None = 按文字排序）；不在列表里的值排在最后
+        self.value_order = list(value_order) if value_order else None
         if proxy_model is not None:
             self.proxy_model = proxy_model
         else:
@@ -666,7 +712,16 @@ class AdvancedFilterWidget(QWidget):
             idx = model.index(row, self.column)
             val = str(model.data(idx, Qt.DisplayRole) or "")
             counts[val] = counts.get(val, 0) + 1
-        sorted_vals = sorted(counts.keys())
+        if self.value_order:
+            # 空白固定最前（和旧 sorted() 的行为一致）；
+            # 已登记的值按业务顺序；未登记的值按文字排在最后。
+            rank = {v: i for i, v in enumerate(self.value_order)}
+            sorted_vals = sorted(
+                counts.keys(),
+                key=lambda v: (0, 0, "") if v == "" else (1, rank.get(v, len(rank)), v),
+            )
+        else:
+            sorted_vals = sorted(counts.keys())
         for val in sorted_vals:
             count = counts[val]
             display_text = f"{val if val else '(空白)'} ({count})"
@@ -771,6 +826,7 @@ class FilterHeaderView(QHeaderView):
                  triangle_active_color=HEADER_TRIANGLE_ACTIVE_COLOR,
                  show_checkbox=True,
                  show_filter=True,
+                 value_order_by_column=None,
                  **check_style_kwargs):
         super().__init__(orientation, parent)
         self.setSectionsClickable(True)
@@ -778,6 +834,8 @@ class FilterHeaderView(QHeaderView):
         self.active_popup = None
         self.show_checkbox = show_checkbox
         self.show_filter = show_filter
+        # {列号: (取值1, 取值2, ...)}，给筛选弹窗指定业务顺序
+        self.value_order_by_column = value_order_by_column or {}
 
         self._press_pos = None
 
@@ -929,7 +987,8 @@ class FilterHeaderView(QHeaderView):
 
         # ★ 修复：将 model 直接传进去
         self.active_popup = AdvancedFilterWidget(column, unique_values, current_allowed, self.window(),
-                                                 proxy_model=model)
+                                                 proxy_model=model,
+                                                 value_order=self.value_order_by_column.get(column))
 
         # ★ 强制立刻计算大小，拿到准确的宽高
         self.active_popup.ensurePolished()

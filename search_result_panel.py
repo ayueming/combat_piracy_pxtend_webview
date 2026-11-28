@@ -18,7 +18,10 @@ from app_data.crawl_status_consts import (
     CRAWL_STATUS_DUPLICATE, CRAWL_STATUS_PARSE_FAILED
 )
 from db_schema import ensure_schema
-from link_ingest_service import archive_batch_by_ids, change_draft_book, clear_draft_category
+from link_ingest_service import (
+    archive_batch_by_ids, change_draft_book, clear_draft_category, get_draft_site_url
+)
+from url_canonical import canonicalize
 from search_batch_queries import get_batch_tables, find_latest_draft_batch
 
 from ws_server import ws_signals
@@ -717,9 +720,32 @@ class SearchResultPanel(QWidget):
     def _card_action(self, card_widget, db_id, action_data, action_type):
         if action_type == "keep":
             category = action_data.split(":")[1] if action_data and ":" in action_data else "其他"
-            inserted, _, _ = archive_batch_by_ids([(db_id, category)], [], [])
+
+            # ★ 入库前先做标准格式判断（离线规则，不联网）。
+            #   搜索爬下来的链接一般不是中转链，这里只需要“格式是否合规”。
+            normalize = True
+            fixed = False
+            url = get_draft_site_url(db_id)
+            result = canonicalize(url)
+            if result.needs_fix:
+                reply = QMessageBox.question(
+                    self, "链接格式提示",
+                    f"该链接不符合【{result.platform}】的标准格式。\n\n"
+                    f"当前：\n{url}\n\n"
+                    f"标准：\n{result.canonical}\n\n"
+                    f"是否替换为标准链接后入库？",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+                )
+                normalize = (reply == QMessageBox.Yes)
+                fixed = normalize
+
+            inserted, _, _ = archive_batch_by_ids(
+                [(db_id, category)], [], [], normalize=normalize)
             if inserted > 0:
-                ToastLabel(self, "✅ 已成功入库", "#10B981")
+                if fixed:
+                    ToastLabel(self, "✅ 已成功入库（链接已规范化）", "#10B981")
+                else:
+                    ToastLabel(self, "✅ 已成功入库", "#10B981")
             else:
                 ToastLabel(self, "ℹ️ 该链接已在库，已跳过", "#6B7280")
         elif action_type == "black":

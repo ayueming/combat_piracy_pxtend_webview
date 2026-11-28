@@ -3,9 +3,10 @@ import os
 from collections import defaultdict
 from PySide6.QtCore import Qt
 from db_config import get_conn
+
 from app_data import (
     CAT_TO_CODE_MAP, CAT_TO_STANDARD_NAME, COMPLAINT_BATCH_SIZE,
-    PLATFORM_OTHER, MODULE_OTHER,
+    PLATFORM_OTHER, MODULE_OTHER, MODULE_SEARCH,
 )
 from app_data.complaint_consts import (
     SINGLE_ITEM_PLATFORMS,
@@ -14,10 +15,86 @@ from app_data.complaint_consts import (
     HOLDER_EVIDENCE_TYPES
 )
 
-from app_data.link_columns import COL_CHK, COL_BOOK, COL_CAT, COL_URL, COL_PUBLISHER
+from app_data.link_columns import (
+    COL_CHK, COL_BOOK, COL_CAT, COL_URL, COL_PUBLISHER, DUP_URL_SUFFIX,
+)
 
 
-def prepare_complaints_data(model, book_list):
+# =========================================================
+# 扩展投诉：把 search 类记录纯复制到其他所有搜索引擎平台
+# 不做任何 URL 改写，其余字段原样共享
+# =========================================================
+def _get_search_platform_cats():
+    """返回所有 search 类平台的标准显示名（自动跳过别名）。"""
+    cats = []
+    for name, info in CAT_TO_CODE_MAP.items():
+        if info["module"] != MODULE_SEARCH:
+            continue
+        if CAT_TO_STANDARD_NAME.get(name) != name:  # 跳过别名
+            continue
+        cats.append(name)
+    return cats
+
+
+def _expand_search_items(checked_data):
+    """
+    把 search 类投诉记录横向复制到所有搜索引擎平台：
+    - 原记录保留
+    - 为其他每个 search 平台各复制一条（URL 原样不动）
+    - 非 search 记录原样保留
+    """
+    search_cats = _get_search_platform_cats()
+    if len(search_cats) <= 1:
+        return checked_data
+
+    result = []
+    for item in checked_data:
+        result.append(item)  # 原记录始终保留
+
+        if item.get("module_code") != MODULE_SEARCH:
+            continue
+
+        original_cat = item.get("cat", "")
+        for target_cat in search_cats:
+            if target_cat == original_cat:
+                continue
+            target_info = CAT_TO_CODE_MAP.get(target_cat)
+            if not target_info:
+                continue
+
+            new_item = dict(item)  # 浅拷贝，URL / id / 证据 / 权利人全部共享
+            new_item["cat"] = target_cat
+            new_item["platform_code"] = target_info["platform"]
+            new_item["module_code"] = target_info["module"]
+            new_item["web_text"] = target_info.get("web_text", "")
+
+            result.append(new_item)
+
+    return result
+
+
+_ROW_CONTENT_COLS = (COL_BOOK, COL_CAT, COL_URL, COL_PUBLISHER)
+
+
+def _is_empty_row(model, row_idx, chk_item):
+    """既没入库、也没填任何内容的行（表格底部空白录入行），跳过而不是报错。"""
+    if chk_item.data(Qt.UserRole):
+        return False
+    for col in _ROW_CONTENT_COLS:
+        item = model.item(row_idx, col)
+        if item and item.text().strip():
+            return False
+    return True
+
+
+def prepare_complaints_data(model, book_list, expand_search=True, target_rows=None):
+    """把链接打包成投诉批次，返回 (batches, error_report)。
+
+    target_rows: 需要处理的行号集合（源模型下标）。
+                 传 None = 老行为，只处理勾选行；
+                 传集合 = 只处理这些行（页面把「勾选 ∪ 选中」传进来）。
+    expand_search: 勾选后把 search 类投诉横向复制到所有搜索引擎。
+    """
     checked_data = []
     error_report = []
 
@@ -55,15 +132,27 @@ def prepare_complaints_data(model, book_list):
 
     conn.close()
 
-    # 3. 遍历模型，执行校验
-    for row_idx in range(model.rowCount()):
+    # 3. 遍历目标行，执行校验
+    if target_rows is None:
+        row_indexes = range(model.rowCount())
+    else:
+        row_indexes = sorted(target_rows)
+
+    for row_idx in row_indexes:
+        if not (0 <= row_idx < model.rowCount()):
+            continue
         chk_item = model.item(row_idx, COL_CHK)
-        if not chk_item or chk_item.checkState() != Qt.Checked:
+        if not chk_item:
+            continue
+        # 老行为（未传 target_rows）：只管勾选行；新入口由 target_rows 决定范围
+        if target_rows is None and chk_item.checkState() != Qt.Checked:
+            continue
+        if _is_empty_row(model, row_idx, chk_item):
             continue
 
         book_name = model.item(row_idx, COL_BOOK).text().strip()
         raw_cat = model.item(row_idx, COL_CAT).text().strip()
-        raw_url = model.item(row_idx, COL_URL).text().replace(" (重复资源链接)", "").strip()
+        raw_url = model.item(row_idx, COL_URL).text().replace(DUP_URL_SUFFIX, "").strip()
         db_id = chk_item.data(Qt.UserRole)
 
         if not book_name or not raw_cat or not raw_url:
@@ -147,7 +236,7 @@ def prepare_complaints_data(model, book_list):
             "rights_holder": holder_name,
             "cat": standard_cat,
             "url": raw_url,
-            "name": model.item(row_idx, 4).text(),
+            "name": model.item(row_idx, COL_PUBLISHER).text(),
             "url_str": url_str,
             "name_str": name_str,
             "platform_code": platform_code,
@@ -167,6 +256,10 @@ def prepare_complaints_data(model, book_list):
             "holder_id_card": author_info["id_card"],  # ★ 新增
             "holder_email": author_info["email"],  # ★ 新增
         })
+
+    # ★ 新增：search 类横向复制（必须在分组切片之前）
+    if expand_search:
+        checked_data = _expand_search_items(checked_data)
 
     # 4. 按 (分类, 书籍) 分组切片 (逻辑不变)
     grouped_data = defaultdict(list)

@@ -1,6 +1,6 @@
 # data_importer_books.py
 """
-作品（books）表格导入逻辑。形态与 data_importer.py 对等：
+作品（books）表格导入逻辑。形态与 data_importer_links.py 对等：
 不直接操作 UI，返回统计与错误明细，由调用方决定如何展示。
 """
 import csv

@@ -201,7 +201,7 @@ class ComplaintDispatcher(QObject):
             if success:
                 self.progress_msg.emit("本批提交成功！正在标记并进入下一批...")
                 self.batch_success.emit(batch)
-                time.sleep(3)  # 缓冲时间，防止操作过快
+                time.sleep(2)  # 缓冲时间，防止操作过快
             else:
                 has_failure = True
                 self.progress_msg.emit("❌ 本批失败，已记录，继续下一批...")  # ★ 不再 break

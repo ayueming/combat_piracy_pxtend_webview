@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
 from PySide6.QtCore import Qt, QUrl
 
 from app_data import ALL_SUB_PLATFORMS
-from mobile_url_utils import resolve_is_mobile
+from url_mobile_utils import resolve_is_mobile
 from picker_web_view import PickerWebView
 
 
